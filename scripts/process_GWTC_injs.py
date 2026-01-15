@@ -1,55 +1,62 @@
 import h5py
 import numpy as np
-import os
 
-import astropy.units as u
-from astropy.cosmology import Planck15
+import sys
+sys.path.append('/work/aqc/lib/effective-spin-priors')
+from priors import chi_effective_prior_from_isotropic_spins
 
-injpath = '/work/aqc/data/GWTC_data/LVK_injections/o1+o2+o3_bbhpop_real+semianalytic-LIGO-T2100377-v2.hdf5'
-injoutdir = '/work/aqc/data/pymcpop/PE_samples/GWTC-injs'
-prefix = ''
+inpath = '/work/aqc/data/GWTC_data/LVK_injections/mixture-semi_o1_o2-real_o3_o4a-polar_spins_20250503134659UTC.hdf'
+outpath = '/work/aqc/data/GWTC_data/processed/o1_o2_o3_o4a_injs.npz'
 
 far_thr = 1 #1/yr
 rho_thr = 10
 
 if __name__ == '__main__':
-    print(f'Processing injections from {injpath}')
-    with h5py.File(injpath, 'r') as f_:
-        f = f_['injections']
+    print(f'Processing injections from {inpath}')
+    with h5py.File(inpath, 'r') as f_:
+        f = f_['events']
 
-        injs = np.vstack([f['mass1_source'][()], f['mass2_source'][()], f['redshift'][()], 
-                          f['spin1x'][()], f['spin1y'][()], f['spin1z'][()], 
-                          f['spin2x'][()], f['spin2y'][()], f['spin2z'][()], 
-                          f['sampling_pdf'][()], f['mixture_weight'][()]]).T
-        far_min = np.min([item[()] for key, item in f.items() if key.startswith('far')], axis=0)
-        rho_opt = f['optimal_snr_net'][()]
-        run = np.array([int(str(i[-1])) for i in np.char.decode(f['name'][()])])
-        mask = np.where(run==3, far_min <= far_thr, rho_opt >= rho_thr)
+        injs = {}
 
-        injs = injs[mask] # save only detected events
+        m1, m2 = f['mass1_source'][()], f['mass2_source'][()]
+        q = m2 / m1
+        chirp_mass = (m1 * m2) ** (3/5) / (m1 + m2) ** (1/5)
 
-        # transform into m1det, m2det, dL
-        z = injs[:,2]
-        m1d = injs[:,0] * (1 + z)
-        m2d = injs[:,1] * (1 + z)
-        dL = Planck15.luminosity_distance(z).to(u.Mpc).value
+        injs['mass_1_source'] = m1
+        injs['mass_2_source'] = m2
+        injs['mass_ratio'] = q
+        injs['chirp_mass_source'] = chirp_mass
 
-        log_p_draw = np.log(injs[:,-2]) 
-        log_mix_wts = np.log(injs[:,-1])
+        injs['redshift'] = f['redshift'][()]
+
+        theta1, theta2 = f['spin1_polar_angle'][()], f['spin2_polar_angle'][()]
+        a1z = f['spin1_magnitude'][()] * np.cos(theta1)
+        a2z = f['spin2_magnitude'][()] * np.cos(theta2)
+        chi_eff = (m1 * a1z + m2 * a2z) / (m1 + m2)
+
+        injs['chi_eff'] = chi_eff
+
+        sampling_pdf = np.exp(f['lnpdraw_mass1_source_mass2_source_redshift_spin1_magnitude_spin1_polar_angle_spin1_azimuthal_angle_spin2_magnitude_spin2_polar_angle_spin2_azimuthal_angle'][()])
+        sampling_pdf *= m1 # m1, m2 -> m1, q 
+        sampling_pdf /= (1/(4*np.pi))**2 * np.sin(theta1) * np.sin(theta2) # uniform prior on spins
+        sampling_pdf *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=1.0)
+        injs['prior'] = sampling_pdf
+
+        injs['w'] = f['weights'][()]
+
+        far_min = np.min([f[name][()] for name in f.dtype.names if name.endswith('_far')], axis=0)
+        rho_opt = f['semianalytic_observed_phase_maximized_snr_net'][()]
+
+        injs['far'] = far_min
+        injs['rho'] = rho_opt
+
+        mask = (rho_opt >= rho_thr) | (far_min <= far_thr)
+
+        injs = {k : v[mask] for k, v in injs.items()} # save only detected events
+
+        injs['total_generated'] = f_.attrs['total_generated']
+        injs['Tobs_yr'] = f_.attrs['total_analysis_time'] / 3.1557e7 # in years
 
         # save everything
-        if not os.path.exists(injoutdir):
-            os.makedirs(injoutdir)
-        os.chdir(injoutdir)
-
-        np.save(prefix+'Ngen.npy', np.asarray(int(f.attrs['total_generated'])))
-        np.save(prefix+'Tobs.npy', np.asarray(f.attrs['analysis_time_s']))
-
-        np.save(prefix+'m1d.npy', m1d)
-        np.save(prefix+'m2d.npy', m2d)
-        np.save(prefix+'dL.npy', dL)
-        np.save(prefix+'log_p_draw.npy', log_p_draw)
-        np.save(prefix+'log_mix_wts.npy', log_mix_wts)
-
-        for i, spin in enumerate(['spin1x', 'spin1y', 'spin1z', 'spin2x', 'spin2y', 'spin2z']):
-            np.save(prefix+f'{spin}.npy', injs[:,i+3])
+        np.savez(outpath, **injs)
+        print('Saved the following keys: ', injs.keys())

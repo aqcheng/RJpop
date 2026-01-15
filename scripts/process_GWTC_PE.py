@@ -1,3 +1,6 @@
+
+# python -u process_GWTC_PE.py --in_path /work/yifanwang/birefringence/lvksamples /work/aqc/data/GWTC_data/GWTC3 /work/aqc/data/GWTC_data/GWTC2.1 --out_path /work/aqc/data/GWTC_data/processed --target_nsamp 9000
+
 # -------------------------
 # ----> GWTC3 helpers <----
 # -------------------------
@@ -83,7 +86,7 @@ GW230609_064958
 GW230624_113103
 GW230627_015337
 GW230628_231200
-GW230630_070659∗
+GW230630_070659
 GW230630_125806
 GW230630_234532
 GW230702_185453
@@ -160,7 +163,19 @@ GW231231_154016
 GW240104_164932
 GW240107_013215
 GW240109_050431
-""" # exclude NSBHs GW230518_125908 and GW230529_181500
+""".split() # exclude NSBHs GW230518_125908 and GW230529_181500
+
+# GWTC3_BBHs = """
+# GW150914_095045
+# GW151012_095443
+# GW151226_033853
+# """.split()
+
+# GWTC4_BBHs = """
+# GW231231_154016
+# GW240104_164932
+# GW240107_013215
+# """.split()
 
 default_params = ['mass_1_source', 'mass_2_source', 'mass_ratio', 'chirp_mass_source', 'redshift', 'chi_eff']
 
@@ -173,6 +188,12 @@ if __name__ == '__main__':
     import numpy as np
     import json
 
+    import sys
+    sys.path.append('/work/aqc/lib/effective-spin-priors')
+    from priors import chi_effective_prior_from_isotropic_spins
+
+    from astropy.cosmology import Planck15
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-params', '--params', type=str, nargs='+', default=default_params,
                         help='Parameters to get samples for.')
@@ -182,14 +203,17 @@ if __name__ == '__main__':
                         help='Output directory')
     parser.add_argument('-catalogs', '--catalogs', type=str, nargs='+', choices=['GWTC2p1', 'GWTC3', 'GWTC4'],
                         default=['GWTC2p1', 'GWTC3', 'GWTC4'], help='Catalogs to use')
-    parser.add_argument('-target_nsamp', '--target_nsamp', type=int, default=5000,
+    parser.add_argument('-target_nsamp', '--target_nsamp', type=int, default=9000,
                         help='Target number of PE samples to save')
+    parser.add_argument('--save_prior', action='store_true', default=False,
+                        help='Save the prior dictionary')
     args = parser.parse_args()
 
     priors, PE_samples = {param: [] for param in args.params}, {param: [] for param in args.params}
 
     os.makedirs(args.out_path, exist_ok=True)
 
+    wf_per_event = []
     for catname in sorted(args.catalogs):
         print(f'Processing catalog {catname}')
         if catname == 'GWTC4':
@@ -197,9 +221,12 @@ if __name__ == '__main__':
             fn_suffix = '.hdf5'
         else:
             eventnames = GWTC3_BBHs
-            fn_suffix = '_cosmo.h5'
+            fn_suffix = '_cosmo.h5' # get uniform in comoving volume
         
-        prior_saved = False
+        if args.save_prior: 
+            prior_saved = False
+        else:
+            prior_saved = True
         
         for path in args.in_path:
             # look for files corresponding to the catalog
@@ -212,16 +239,23 @@ if __name__ == '__main__':
                         print(f'    {event_name}')
                         with h5py.File(os.path.join(path, fn), 'r') as f:
 
-                            mixed_key = [k for k in f.keys() if 'Mixed' in k][0]
+                            if catname == 'GWTC4':
+                                if any('NRSur' in k for k in f.keys()):
+                                    key = [k for k in f.keys() if 'NRSur' in k][0]
+                                else:
+                                    key = [k for k in f.keys() if 'Mixed' in k][0]
+                            else:
+                                key = [k for k in f.keys() if 'IMRPhenom' in k][0]
+                            wf_per_event.append([event_name, key.split(':')[-1]])
                             
-                            nsamps_tot = f[mixed_key]['posterior_samples'].size
+                            nsamps_tot = f[key]['posterior_samples'].size
                             if nsamps_tot > args.target_nsamp:
                                 inds = np.sort(np.random.choice(nsamps_tot, args.target_nsamp, replace=False))
                             else:
                                 inds = np.arange(nsamps_tot)
 
                             for param in args.params:
-                                PE_samples[param].append(f[mixed_key]['posterior_samples'][inds, param])
+                                PE_samples[param].append(f[key]['posterior_samples'][inds, param])
 
                             if not prior_saved:
                                 phenom_key = [k for k in f.keys() if 'IMRPhenom' in k][0]
@@ -241,8 +275,34 @@ if __name__ == '__main__':
     nsamps = min([len(i) for i in PE_samples[args.params[0]]])
     print(f'Using {nsamps} samples for each event (target: {args.target_nsamp})')
 
+    # downsample each event
+    for event_idx in range(len(PE_samples[args.params[0]])):
+        inds = np.random.randint(0, len(PE_samples[args.params[0]][event_idx]), nsamps)
+        for param in args.params:
+            PE_samples[param][event_idx] = PE_samples[param][event_idx][inds]
+
     for param in args.params:
-        PE_samples[param] = np.vstack([i[:nsamps] for i in PE_samples[param]])
+        PE_samples[param] = np.vstack(PE_samples[param])
+    
+    # compute prior
+    # default prior: uniform in det-frame masses, uniform in comoving volume, isotropic spins
+    # want p(m1, q, chieff, z)
+
+    z = PE_samples['redshift']
+    m1 = PE_samples['mass_1_source']
+    q = PE_samples['mass_ratio']
+    chi_eff = PE_samples['chi_eff']
+
+    prior = (1+z)**2 * Planck15.differential_comoving_volume(z).value / 1e9 #p(m1,m2,z)
+    prior *= m1 # p(m1,m2) -> p(m1, q)
+
+    prior *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=0.99)
+
+    PE_samples['prior'] = prior
+
     # save 
     prefix = 'GWTC' + '_'.join([catname.split('GWTC')[-1] for catname in args.catalogs])
     np.savez(os.path.join(args.out_path, prefix+'_PE_samples.npz'), **PE_samples)
+
+    # save table of event names, keys
+    np.savetxt(os.path.join(args.out_path, prefix+'_waveforms.txt'), wf_per_event, fmt='%s')

@@ -1,2 +1,7 @@
 scratch/
 .ipynb_checkpoints
+results/
+scripts/test*
+scripts/ref*
+submit/
+__pycache__/

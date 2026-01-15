@@ -14,14 +14,12 @@ if __name__ == '__main__':
 
     import argparse
     import os
-    import re
     import h5py
     import numpy as np
-    import json
 
     import sys
     sys.path.append('/work/aqc/lib/effective-spin-priors')
-    from priors import chi_effective_prior_from_aligned_spins
+    from priors import chi_effective_prior_from_isotropic_spins
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-params', '--params', type=str, nargs='+', default=default_params,
@@ -61,7 +59,7 @@ if __name__ == '__main__':
 
                 prior = dL**2 # P(Mc, q, dL)
                 prior *= eta**(3/5) * (1. + q) # P(Mc, q) -> P(m1, q)
-                prior *= chi_effective_prior_from_aligned_spins(chieff, q, aMax=0.8) #P(chieff)
+                prior *= chi_effective_prior_from_isotropic_spins(chieff, q, aMax=0.8) #P(chieff)
                 prior *= ddL_dz(z) # P(dL) -> P(z)
 
                 PE_samples['prior'].append(prior)
