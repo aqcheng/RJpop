@@ -1398,8 +1398,8 @@ def _leaf_rates_z02(samples_leaf, z_02_factor_draws):
     return r0 * z_02_factor_draws.reshape((-1,) + (1,) * (r0.ndim - 1)) # nsamples is the 0th dimension
     # nsamples, ncomps
 
-def _branch_label_ppd(param_name, branch_idx, data_flat, draw_ctx):
-    """Compute label-aggregated PPD contributions for one branch.
+def _branch_label_ppd(param_name, branch_idx, data_flat, draw_ctx, use_labels=True):
+    """Compute (label-aggregated) PPD contributions for one branch.
 
     For each posterior draw and each cluster label, sum contributions from all
     leaves assigned that label (component) from k-means clustering. This allows multiple 
@@ -1456,9 +1456,9 @@ def _branch_label_ppd(param_name, branch_idx, data_flat, draw_ctx):
         x = utils.to_numpy(data_flat[param_name])
         leaf_pdf = utils.to_numpy(eval_param_model(data_flat, branch_idx, param_name, hyperparams))
         leaf_pdf = np.nan_to_num(leaf_pdf, nan=0.0, posinf=0.0, neginf=0.0)
-    
+
     # leaf_pdf has shape (nsamples, ncomps, ngrid)
-    if branch_name in rj_branches:
+    if branch_name in rj_branches and use_labels:
         # aggregate by label (sum of rate-weighted leaves with same label, per sample)
         rate_ppd_by_label = np.zeros((ncomps, leaf_pdf.shape[0], leaf_pdf.shape[-1]), dtype=np.float64) # ncomps, nsamples, ngrid
         rate_by_label = np.zeros((ncomps, leaf_pdf.shape[0]), dtype=np.float64)
@@ -1496,13 +1496,15 @@ for i, bn in enumerate(branch_names[:-1]):
     pal_name = palette_names[i % len(palette_names)]
     color_palettes[bn] = color_palette(pal_name, nlab)
 
-def plot_model_ppd(param_name, color_tot='cornflowerblue'):
+def plot_model_ppd(param_name, color_tot='cornflowerblue', use_labels=True):
     """
     Plot PPDs using one subplot per RJ model (top-N by posterior frequency).
 
     Components are grouped by (branch_name, label_id). For each model subplot, we
     evaluate PPDs on a random subsample of posterior draws belonging to that RJ
     model signature, and plot credible intervals for each component plus a total.
+
+    CI=None plots individual ppds rather than a credible interval.
     """
 
     param_name_check = 'mass' if param_name.startswith('mass') else param_name
@@ -1544,7 +1546,10 @@ def plot_model_ppd(param_name, color_tot='cornflowerblue'):
                 palette = color_palettes[branch_name]
                 if param_name_check not in hp_ordering[branch_idx]:
                     continue
-                branch_rate_ppd_by_label, branch_rate_by_label, x = _branch_label_ppd(param_name, branch_idx, data_flat, draw_ctx)
+                branch_rate_ppd_by_label, branch_rate_by_label, x = _branch_label_ppd(
+                    param_name, branch_idx, data_flat, draw_ctx, use_labels
+                )
+                nsamples = branch_rate_ppd_by_label.shape[1]
 
                 if len(branch_rate_ppd_by_label) > 1:
                     for label_idx in range(len(branch_rate_ppd_by_label)):
@@ -1562,15 +1567,19 @@ def plot_model_ppd(param_name, color_tot='cornflowerblue'):
                 ppd_by_comp.append(branch_rate_ppd_by_label)
                 rate_by_comp.append(branch_rate_by_label)
 
+                # each ppd is (nsamples, ngrid)
                 for label_idx, ppd in enumerate(branch_rate_ppd_by_label):
                     legend_label = branch_name if (label_idx == 0 and len(branch_names) > 2) else None
-                    utils.plot_CI(ax_comp, x, ppd, color=palette[label_idx], label=legend_label)
-            
+                    color = palette[label_idx] if use_labels else color_tot
+
+                    utils.plot_ppds(ax_comp, x, ppd, CI=None, color=color, label=legend_label)
+                    # use individual ppds for components
+
             # plot total
             ppd_by_comp = np.concatenate(ppd_by_comp, axis=0)
             rate_by_comp = np.concatenate(rate_by_comp, axis=0)
             tot_ppd = np.sum(ppd_by_comp, axis=0)
-            utils.plot_CI(ax_tot, x, tot_ppd, color=color_tot, label='Total PPD')
+            utils.plot_ppds(ax_tot, x, tot_ppd, CI=None, color=color_tot, label='Total PPD')
 
             # formatting
             ax_tot.set_ylabel(None)
@@ -1640,7 +1649,7 @@ def plot_model_ppd(param_name, color_tot='cornflowerblue'):
             # x = utils.to_numpy(data_flat[param_name])
         
         utils.setup_and_plot_GWTC4(param_name, ax, res=res)
-        utils.plot_CI(ax, x, ppd, color=color_tot)
+        utils.plot_ppds(ax, x, ppd, CI=90, color=color_tot)
         ax.legend()
 
         # save to dictionary
@@ -1649,9 +1658,10 @@ def plot_model_ppd(param_name, color_tot='cornflowerblue'):
     
     else:
         raise ValueError(f'Unrecognized param name {param_name}')
-        
-    plt.savefig(os.path.join(figpath, f'{param_name}.pdf'))
-    print(f'Saved {param_name}.pdf')
+    
+    fn = f'{param_name}_labelled.pdf' if use_labels else f'{param_name}.pdf'
+    plt.savefig(os.path.join(figpath, fn))
+    print(f'Saved {fn}')
     plt.close()
 
     dict_out['x'] = x.copy()
@@ -1663,7 +1673,8 @@ if rj_branches:
     ppds_dict['model_sigs'] = sig_names
     ppds_dict['bayes_factors'] = bayes_factors
 for param_name in ['mass', 'chi_eff', 'redshift', 'mass_ratio', 'mass_2']:
-    ppds_dict[param_name] = plot_model_ppd(param_name)
+    ppds_dict[f'{param_name}_unlabelled'] = plot_model_ppd(param_name, use_labels=False)
+    ppds_dict[f'{param_name}'] = plot_model_ppd(param_name, use_labels=True)
 
 np.save(os.path.join(datapath, 'ppds.npy'), ppds_dict, allow_pickle=True)
 print(f'Saved ppds.npy')
