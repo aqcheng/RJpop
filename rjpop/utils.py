@@ -127,7 +127,7 @@ MODELS = {
     }
 }
 PARAM_SCALES = { # characteristic scales for each parameter
-    'mass': 5,
+    'mass': 10,
     'mass_ratio': 0.4,
     'chi_eff': 0.2,
 }
@@ -243,14 +243,20 @@ def get_discard_from_chain(logP):
 def textsc_ify(word: str) -> str:
     return f'$\\textsc{{{word}}}$'
 
-def plot_CI(ax, x, ppd, color='k', CI=90, label=None, fill_alpha = 0.3, lw = 2, ls='-'):
-    dist = (100 - CI)/2
-    percs = [dist, 50, 100 - dist]
-    low, med, high = np.nanpercentile(ppd, percs, axis=0)
-    ax.plot(x, med, color = color, lw = lw, ls = ls)
-    if label is not None:
-        label = textsc_ify(label)
-    ax.fill_between(x, low, high, color = color, alpha = fill_alpha, label=label)
+def plot_ppds(ax, x, ppds, color='k', CI=90, label=None, fill_alpha = 0.3, lw = 2, ls='-'):
+    if CI is None:
+        for ppd in ppds: # plot individual ppds
+            if np.any(ppd > 0):
+                ax.plot(x, ppd, color=color, alpha=0.1, lw=0.1)
+    
+    else:
+        dist = (100 - CI)/2
+        percs = [dist, 50, 100 - dist]
+        low, med, high = np.nanpercentile(ppds, percs, axis=0)
+        ax.plot(x, med, color = color, lw = lw, ls = ls)
+        if label is not None:
+            label = textsc_ify(label)
+        ax.fill_between(x, low, high, color = color, alpha = fill_alpha, label=label)
 
 corner_defaults = dict(
     color='darkred',
