@@ -12,7 +12,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": "${command:pickArgs}",
-            "python": "/work/aqc/miniconda3/envs/rjpop/bin/python"
+            "python": "/work/aqc/miniconda3/envs/rjpop/bin/python",
+            "justMyCode": false
         }
     ]
 }

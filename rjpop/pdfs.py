@@ -3,15 +3,10 @@ from abc import ABC, abstractmethod
 
 from astropy.cosmology import Planck15
 
-try:
-    from cupyx.scipy import special
-    import cupy as xp
-except (ModuleNotFoundError, ImportError) as e:
-    import numpy as xp
-    import scipy.special as special
+from xp import xp, special
 
-EPS = xp.finfo(xp.float64).eps * 2
-INF = xp.finfo(xp.float64).max / 1e6
+EPS = float( xp.finfo(xp.float64).eps * 2 )
+INF = float( xp.sqrt(xp.finfo(xp.float64).max) / 10 )
 
 
 def trapz(y, x=None, dx=1.0, axis=-1):
@@ -86,11 +81,15 @@ def trapz(y, x=None, dx=1.0, axis=-1):
         ret = xp.add.reduce(product, axis)
     return ret
 
+def rescale(x, loc, scale):
+    return (x - loc) / scale
+
 class dist(ABC):
     """
     Base class for distributions. Strictly speaking, only the _pdf method is necessary to implement
     during inference. 
     """
+    
     @staticmethod
     @abstractmethod
     def _pdf(x, *args, **kwargs):
@@ -103,6 +102,19 @@ class dist(ABC):
         # The core logpdf logic for the standard distribution
         raise NotImplementedError
     
+    # these are optional
+    @staticmethod
+    def _cdf(x, *args, **kwargs):
+        raise NotImplementedError
+    
+    @staticmethod
+    def _logcdf(x, *args, **kwargs):
+        raise NotImplementedError
+    
+    @staticmethod
+    def _ppf(x, *args, **kwargs):
+        raise NotImplementedError
+    
     @classmethod
     def pdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._pdf((x - loc) / scale, *args, **kwargs) / scale
@@ -110,6 +122,18 @@ class dist(ABC):
     @classmethod
     def logpdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._logpdf((x - loc) / scale, *args, **kwargs) - xp.log(scale)
+    
+    @classmethod
+    def cdf(cls, x, *args, loc=0, scale=1, **kwargs):
+        return cls._cdf((x - loc) / scale, *args, **kwargs)
+
+    @classmethod
+    def logcdf(cls, x, *args, loc=0, scale=1, **kwargs):
+        return cls._logcdf((x - loc) / scale, *args, **kwargs)
+    
+    @classmethod
+    def ppf(cls, q, *args, loc=0, scale=1, **kwargs):
+        return cls._ppf(q, *args, **kwargs) * scale + loc
     
     @staticmethod
     def _moments(*args, **kwargs):
@@ -120,26 +144,12 @@ class dist(ABC):
          mean, std = cls._moments(*args, **kwargs)
          return mean * scale + loc, std * scale
 
-def rescale(x, loc, scale):
-    return (x - loc) / scale
-
 class trunc_dist(dist):
 
     @staticmethod
     @abstractmethod
     def _cdf(x, *args, **kwargs):
-        # The core cdf logic for the standard distribution. Only required for trunc_dist
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def _logcdf(x, *args, **kwargs):
-        # The core logcdf logic for the standard distribution. Only required for trunc_dist
-        raise NotImplementedError
-    
-    @staticmethod
-    def _ppf(x, *args, **kwargs):
-        # The core ppf logic for the standard distribution
+        # The core cdf logic for the standard distribution w/o limits. Required for trunc_dist
         raise NotImplementedError
     
     @classmethod
@@ -178,9 +188,24 @@ class trunc_dist(dist):
         return xp.where(log_norm > 0, logpdf_unnorm - log_norm, -INF)
     
     @classmethod
+    def _get_minmax_quantiles(cls, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
+        """
+        Returns the quantiles of xmin and xmax given loc and scale.
+        """
+        q_low = 0.0 if xmin is -INF else xp.clip(cls._cdf(rescale(xmin, loc, scale), *args, **kwargs), 0.0, 1 - EPS)
+        q_high = 1.0 if xmax is INF else xp.clip(cls._cdf(rescale(xmax, loc, scale), *args, **kwargs), EPS, 1.0)
+        return q_low, q_high
+    
+    @classmethod
+    def cdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
+        _q_low, _q_high = cls._get_minmax_quantiles(*args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs)
+        
+        _q = cls._cdf(rescale(x, loc, scale), *args, **kwargs)
+        return xp.clip((_q - _q_low)/(_q_high - _q_low), 0.0, 1.0)
+    
+    @classmethod
     def ppf(cls, q, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
-        _q_low = xp.clip(cls._cdf(rescale(xmin, loc, scale), *args, **kwargs), 0.0, 1 - EPS)
-        _q_high = xp.clip(cls._cdf(rescale(xmax, loc, scale), *args, **kwargs), EPS, 1.0)
+        _q_low, _q_high = cls._get_minmax_quantiles(*args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs)
         
         _q = xp.clip(q * (_q_high - _q_low) + _q_low, EPS, 1 - EPS)
         return cls._ppf(_q, *args, **kwargs) * scale + loc
@@ -359,7 +384,7 @@ class gaussian(trunc_dist):
     
     @staticmethod
     def _ppf(q):
-        return -xp.sqrt(2) * special.erfcinv(2*q)
+        return special.ndtri(q)
     
     @classmethod
     def moments(cls, loc=0, scale=1, xmin=-INF, xmax=INF):
@@ -548,6 +573,17 @@ class powerlaw:
         return prob
     
     @staticmethod
+    def cdf(x, beta, xmin, xmax):
+        log_ratio = xp.log(xmax / xmin)
+        beta = xp.atleast_1d(beta)
+        a = 1.0 + beta
+        x_clipped = xp.clip(x, xmin, xmax)
+        cdf_ne1 = (xp.power(x_clipped, a) - xp.power(xmin, a)) / (xp.power(xmax, a) - xp.power(xmin, a))
+        cdf_beta_m1 = xp.log(x_clipped / xmin) / log_ratio
+        cdf_inner = xp.where(beta == -1.0, cdf_beta_m1, cdf_ne1)
+        return xp.where(x <= xmin, 0.0, xp.where(x >= xmax, 1.0, cdf_inner))
+    
+    @staticmethod
     def ppf(q, beta, xmin, xmax):
         a = 1.0 + beta
         return xp.where(
@@ -563,8 +599,7 @@ class powerlaw:
         width = med - cls.ppf(0.16, **kwargs)
         return med, width
 
-
-class smoothed_powerlaw(dist):
+class smoothed_powerlaw:
 
     """
     Implements the power-law distribution with minimum, maximum, and lower-end smoothing.
@@ -582,7 +617,7 @@ class smoothed_powerlaw(dist):
     """
 
     @staticmethod
-    def _pdf(x, alpha, xmin, xmax, p):
+    def pdf(x, alpha, xmin, xmax, p):
 
         x = xp.asarray(x)
 
@@ -595,13 +630,55 @@ class smoothed_powerlaw(dist):
         # need to multiply regularized incomplete beta by beta(a,b) to get the incomplete beta function
 
         return xp.where(
-            (x >= xmin) & (x <= xmax) & (C > 0),
+            (x >= xmin) & (x <= xmax) & (C > 0) & (alpha >= 1),
             (1/C) * xp.power(x, -alpha) * xp.power(1.0 - xmin / x, p),
             0.0
         )
     
     @staticmethod
-    def _logpdf(x, alpha, xmin, xmax, p):
+    def cdf(x, alpha, xmin, xmax, p):
+
+        x = xp.asarray(x)
+
+        a = p + 1
+        b = alpha - 1
+        u_max = 1 - xmin / xmax
+
+        # regularized incomplete beta at xmax
+        I_max = special.betainc(a, b, u_max)
+
+        # argument of incomplete beta
+        u = 1 - xmin / x
+
+        F = special.betainc(a, b, u) / I_max
+
+        return xp.where(
+            x < xmin,
+            0.0,
+            xp.where(x > xmax, 1.0, F)
+        )
+
+    @staticmethod
+    def ppf(q, alpha, xmin, xmax, p):
+
+        q = xp.asarray(q)
+
+        a = p + 1
+        b = alpha - 1
+        u_max = 1 - xmin / xmax
+
+        # regularized incomplete beta at xmax
+        I_max = special.betainc(a, b, u_max)
+
+        # inverse regularized incomplete beta
+        u = special.betaincinv(a, b, q * I_max)
+
+        x = xmin / (1.0 - u)
+
+        return xp.clip(x, xmin, xmax)
+    
+    @staticmethod
+    def logpdf(x, alpha, xmin, xmax, p):
 
         x = xp.asarray(x)
         
@@ -709,31 +786,298 @@ class LVK_Plancktaper_powerlaw(dist):
         if xx_int is None:
             xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256) 
         
-        norm = xp.trapezoid(
+        norm = xp.trapz(
             cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta),
             xx_int,
             axis=-1
         )[:,None]
         return logpdf_unnorm - xp.log(norm)
 
-# class primary_mass_q_distribution:
+_mm = xp.linspace(2, 100, 512)
+_dm = _mm[1] - _mm[0]
 
-#     def __init__(self, primary_mass_model, q_model):
-#         self.primary_mass_model = primary_mass_model
+class MassModel:
+    
+    @abstractmethod
+    def pdf(self, data, **kwargs):
+        """
+        For consistency (especially with PE priors), always return p(m1, q) regardless of model.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_marginal_pdf(self, param_vals, param, *args, **kwargs):
+        """
+        Return marginalized p(param). Allowed values of param: 'mass_1_source', 'mass_ratio', 'mass_2_source'
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def moments(self, *args, **kwargs) -> dict:
+        """
+        Return moments of the secondary distributions, in dictionary format.
+        """
+        raise NotImplementedError
+
+class m1_q_model(MassModel):
+
+    def __init__(self, mass_1_source_model: dist, mass_ratio_model: dist):
+        self.m1_model = mass_1_source_model
+        self.q_model = mass_ratio_model
+    
+    params = ('mass_1_source', 'mass_ratio')
+    
+    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
+        if 'xmax' not in mass_ratio_kwargs:
+            mass_ratio_kwargs['xmax'] = 1.0
+        return self.q_model.pdf(
+            data['mass_ratio'], 
+            xmin=mass_1_source_kwargs['xmin']/data['mass_1_source'], 
+            **mass_ratio_kwargs
+        )
+    
+    def _p_q(self, q, mass_1_source_kwargs, mass_ratio_kwargs):
+        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
+        data_flat = {'mass_ratio': qq.ravel(), 'mass_1_source': mm1.ravel()}
+
+        p_m_q = self.pdf(data_flat, mass_1_source_kwargs=mass_1_source_kwargs, mass_ratio_kwargs=mass_ratio_kwargs)
+        p_m_q = p_m_q.reshape(p_m_q.shape[:-1] + (len(q), len(_mm)))
+
+        return xp.sum(p_m_q, axis=-1) * _dm
+    
+    def _p_m2(self, m2, mass_1_source_kwargs, mass_ratio_kwargs):
+        mm2, mm1 = xp.meshgrid(m2, _mm, indexing='ij')
+        qq = mm2 / mm1
+        data_flat = {'mass_ratio': qq.ravel(), 'mass_1_source': mm1.ravel()}
+
+        p_m_q = self.pdf(data_flat, mass_1_source_kwargs=mass_1_source_kwargs, mass_ratio_kwargs=mass_ratio_kwargs)
+        p_m1_m2 = p_m_q.reshape(p_m_q.shape[:-1]+(len(m2), len(_mm))) / _mm
+        return xp.sum(p_m1_m2, axis=-1) * _dm
+    
+    def get_marginal_pdf(self, param_vals, param, mass_1_source_kwargs, mass_ratio_kwargs):
+        if param == 'mass_1_source':
+            return self.m1_model.pdf(param_vals, **mass_1_source_kwargs)
+        elif param == 'mass_ratio':
+            return self._p_q(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
+        elif param == 'mass_2_source':
+            return self._p_m2(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
+        else:
+            raise ValueError(f"Unknown parameter {param}")
+
+    def pdf(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
+        return self.m1_model.pdf(data['mass_1_source'], **mass_1_source_kwargs) * \
+               self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs)
+    
+    def moments(self, mass_1_source_kwargs, mass_ratio_kwargs):
+        mass_ratio_kwargs['xmin'] = 0.0
+        mass_ratio_kwargs['xmax'] = 1.0
+        m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
+        q_mu, q_std = self.q_model.moments(**mass_ratio_kwargs)
+        return {
+            'mass_1_source': (m1_mu, m1_std),
+            'mass_ratio': (q_mu, q_std)
+        }
+
+# class Mc_q_model(MassModel):
+
+#     def __init__(self, Mc_model: dist, q_model: dist):
+#         self.Mc_model = Mc_model
 #         self.q_model = q_model
 
-#     def __call__(self, m1, q, m1_kwargs, q_kwargs):
-#         return self.primary_mass_model(m1, **m1_kwargs) * self.q_model(q, xmin=m1_kwargs['xmin']/m1, xmax=1., **q_kwargs)
+def gaussian_copula(u, v, rho):
+    """
+    Implements the Gaussian copula
 
-# class chirp_mass_q_distribution:
+    .. math::
+        c_\rho(u, v) = \frac{1}{\sqrt{1-\rho^2}} 
+                    \exp \left(\frac{2 \rho z_1 z_2-\rho^2 (z_1^2+z_2^2)}{2(1-\rho^2)}\right)
+    
+    where :math: `z_i=\Phi^{-1}(u_i)`.
+    
+    Parameters
+    ----------
+    rho : float
+        Correlation parameter.
+    u, v : array-like
+        The CDF values of the marginals.
+    
+    Returns
+    -------
+    array-like
+        Copula values.
+    """
 
-#     def __init__(self, chirp_mass_model, q_model):
-#         self.chirp_mass_model = chirp_mass_model
-#         self.q_model = q_model
+    z1 = xp.clip(special.ndtri(u), -INF, INF)
+    z2 = xp.clip(special.ndtri(v), -INF, INF)
+    return xp.exp(
+        (2*rho*z1*z2 - rho**2*(z1**2 + z2**2)) / (2*(1.0 - rho**2))
+    ) / xp.sqrt(1.0 - rho**2)
 
-#     def __call__(self, mchirp, q, mchirp_kwargs, q_kwargs):
-#         return self.chirp_mass_model(mchirp, **mchirp_kwargs) * self.q_model(q, xmin=0., xmax=1., **q_kwargs)
+def _check_gaussian_copula_params(m1, m2, rho):
+    return (m1 >= m2) * (rho > -1) * (rho < 1)
 
+class gaussian_copula_mass_model(MassModel):
+    def __init__(self, mass_1_source_model: dist, mass_2_source_model: dist):
+        self.m1_model = mass_1_source_model
+        self.m2_model = mass_2_source_model
+    
+    params = ('mass_1_source', 'mass_2_source')
+    
+    _zz = xp.linspace(-5, 5, 256)
+    _dz = _zz[1] - _zz[0]
+    
+    def _compute_norm(self, rho, mass_1_source_kwargs, mass_2_source_kwargs):
+        """
+        Computes P(m2 <= m1), which is the normalization of the joint pdf.
+        For the Gaussian copula, this is the integral
+
+        .. math::
+            P (m_2 < m_1) = \int_{-\infty}^{\infty} \phi\left(z_1\right) 
+            \Phi\left(\frac{\Phi^{-1}\left(F_2\left(F_1^{-1}\left(\Phi\left(z_1\right)\right)\right)\right)-\rho z_1}{\sqrt{1-\rho^2}}\right) \, dz_1
+        """
+
+        # m1 = F1^{-1}(Phi(z1))
+        m1 = self.m1_model.ppf(special.ndtr(self._zz), **mass_1_source_kwargs)
+
+        # threshold in z2-space
+        z2_thr = special.ndtri(self.m2_model.cdf(m1, **mass_2_source_kwargs))
+
+        # conditional CDF
+        arg = (z2_thr - rho * self._zz) / xp.sqrt(1 - rho**2)
+        integrand = gaussian._pdf(self._zz) * special.ndtr(arg)
+
+        return xp.sum(integrand) * self._dz
+    
+    def pdf(self, data, rho, mass_1_source_kwargs, mass_2_source_kwargs):
+        
+        m1, m2 = data['mass_1_source'], data['mass_2_source']
+
+        u = self.m1_model.cdf(m1, **mass_1_source_kwargs)
+        v = self.m2_model.cdf(m2, **mass_2_source_kwargs)
+        norm = self._compute_norm(rho, mass_1_source_kwargs, mass_2_source_kwargs)
+
+        jacobian = m1 # P(m1, m2) -> P(m1, q)
+        
+        res = self.m1_model.pdf(m1, **mass_1_source_kwargs) * \
+              self.m2_model.pdf(m2, **mass_2_source_kwargs) * \
+              gaussian_copula(u, v, rho)  / norm * jacobian * \
+              _check_gaussian_copula_params(m1, m2, rho)
+        
+        return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
+    
+    @staticmethod
+    def _check_params(m1, m2, rho):
+        return (m1 >= m2) * (rho > -1) * (rho < 1)
+
+    def _p_q(self, q, mass_1_source_kwargs, mass_2_source_kwargs, rho):
+        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
+        mm2 = mm1 * qq
+        data_flat = {'mass_1_source': mm1.ravel(), 'mass_2_source': mm2.ravel()}
+
+        p_m1_q = self.pdf(data_flat, rho, mass_1_source_kwargs, mass_2_source_kwargs)
+        p_m1_q = p_m1_q.reshape(p_m1_q.shape[:-1] + (len(q), len(_mm)))
+        return xp.nansum(p_m1_q, axis=-1) * _dm
+    
+    def get_marginal_pdf(self, param_vals, param, rho, mass_1_source_kwargs, mass_2_source_kwargs):
+        if param == 'mass_1_source':
+            return self.m1_model.pdf(param_vals, **mass_1_source_kwargs)
+        elif param == 'mass_ratio':
+            return self._p_q(param_vals, mass_1_source_kwargs, mass_2_source_kwargs, rho)
+        elif param == 'mass_2_source':
+            return self.m2_model.pdf(param_vals, **mass_2_source_kwargs)
+        else:
+            raise ValueError(f"Unknown parameter {param}")
+    
+    def moments(self, mass_1_source_kwargs, mass_ratio_kwargs, rho):
+        m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
+        m2_mu, m2_std = self.m2_model.moments(**mass_ratio_kwargs)
+        return {
+            'mass_1_source': (m1_mu, m1_std),
+            'mass_2_source': (m2_mu, m2_std)
+        }
+
+class sym_gaussian_copula_mass_model(MassModel):
+    """
+    Gaussian copula mass model, but assumes that all masses are drawn from the same
+    distribution X ~ p(m) with some pairing function (copula). From here we derive
+    the expressions for the distrbituions of :math:`m_1 = \max(X_1, X_2)` and 
+    :math:`m_2 = \min(X_1, X_2)`.
+
+    In these functions `mass_1_source_model` and `mass_1_source_kwargs` refers to the
+    model and kwargs of the shared mass model X.
+    """
+
+    def __init__(self, mass_1_source_model: dist):
+        self.m_model = mass_1_source_model
+    
+    params = ('mass_1_source', 'mass_2_source')
+    
+    def pdf(self, data, rho, mass_1_source_kwargs):
+        r"""
+        Evaluates the joint density
+
+        .. math::
+            p(m_2, m_1) = 2 f(m_2) f(m_1) c_\rho(F(m_2), F(m_1)) \qquad m_2 < m_1,
+
+        where :math:`c_\rho(u,v)` is the Gaussian copula density.
+        """
+        
+        m1, m2 = data['mass_1_source'], data['mass_2_source']
+
+        u = self.m_model.cdf(m1, **mass_1_source_kwargs)
+        v = self.m_model.cdf(m2, **mass_1_source_kwargs)
+
+        jacobian = m1 # P(m1, m2) -> P(m1, q)
+        
+        res = self.m_model.pdf(m1, **mass_1_source_kwargs) * \
+              self.m_model.pdf(m2, **mass_1_source_kwargs) * \
+              gaussian_copula(u, v, rho)  * 2 * jacobian * \
+              _check_gaussian_copula_params(m1, m2, rho)
+        
+        return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
+    
+    def _p_m1(self, m1, rho, mass_1_source_kwargs):
+        r"""
+        Evaluates the marginal distribution
+
+        .. math::
+            p(m_1) = 2 f(m_1) \Phi\ \left(\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_1))\right)
+        """
+        arg = xp.sqrt((1.-rho)/(1.+rho)) * special.ndtri(self.m_model.cdf(m1, **mass_1_source_kwargs))
+        return 2 * self.m_model.pdf(m1, **mass_1_source_kwargs) * special.ndtr(arg)
+    
+    def _p_m2(self, m2, rho, mass_1_source_kwargs):
+        r"""
+        Evaluates the marginal distribution
+
+        .. math::
+            p(m_2) = 2 f(m_2) \Phi\ \left(-\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_2))\right)
+        """
+        arg = xp.sqrt((1.-rho)/(1.+rho)) * special.ndtri(self.m_model.cdf(m2, **mass_1_source_kwargs))
+        return 2 * self.m_model.pdf(m2, **mass_1_source_kwargs) * special.ndtr(-arg)
+    
+    def _p_q(self, q, rho, mass_1_source_kwargs):
+        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
+        mm2 = mm1 * qq
+        data_flat = {'mass_1_source': mm1.ravel(), 'mass_2_source': mm2.ravel()}
+
+        p_m1_q = self.pdf(data_flat, rho, mass_1_source_kwargs)
+        p_m1_q = p_m1_q.reshape(p_m1_q.shape[:-1] + (len(q), len(_mm)))
+        return xp.nansum(p_m1_q, axis=-1) * _dm
+    
+    def get_marginal_pdf(self, param_vals, param, rho, mass_1_source_kwargs):
+        if param == 'mass_1_source':
+            return self._p_m1(param_vals, rho, mass_1_source_kwargs)
+        elif param == 'mass_ratio':
+            return self._p_q(param_vals, rho, mass_1_source_kwargs)
+        elif param == 'mass_2_source':
+            return self._p_m2(param_vals, rho, mass_1_source_kwargs)
+        else:
+            raise ValueError(f"Unknown parameter {param}")
+    
+    def moments(self, mass_1_source_kwargs, rho):
+        m_mu, m_std = self.m_model.moments(**mass_1_source_kwargs)
+        return {'mass_1_source': (m_mu, m_std)}
 
 ###################
 # Rate models

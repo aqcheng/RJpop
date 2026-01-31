@@ -14,43 +14,68 @@ sys.path.append(os.path.join(lvk_res_path, 'figure_scripts'))
 import plot_funcs_bbh_mass as pf
 pf.setup()
 
+from xp import xp
+
+# plotting
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
+import matplotlib.colors as pltc
+
+import re
+
 ### HARD CODED MODEL DEFINITIONS
 
 # dictionary of models and their hyperparameters -- these are manually hard coded in 
 XMAX_FIX = 300.0
 MODELS = {
     'mass': {
+        'm1_q': {
+            'model': pdfs.m1_q_model,
+            'param_latex': {}
+        },
+        'gaussian_copula': {
+            'model': pdfs.gaussian_copula_mass_model,
+            'param_latex': {
+                'rho': r'$\rho$'
+            }
+        },
+        'sym_gaussian_copula': {
+            'model': pdfs.sym_gaussian_copula_mass_model,
+            'param_latex': {
+                'rho': r'$\rho$'
+            }
+        }
+    },
+    'mass_1_source': { # for p(m1) or p(m2)
+        'param_latex': { # shared between all models of the parameter
+            'xmin': r'$m_{\min}$',
+            'xmax': r'$m_{\max}$'
+        },
         'skew-t': {
             'model': pdfs.jf_skew_t(),
             'param_latex': {
                 'logalpha': r'$\log_{10}\alpha$',
                 'logkappa': r'$\log_{10}\kappa$',
                 'loc': r'$\mu_m$',
-                'scale': r'$\sigma_m$',
-                'xmin': r'$m_{\min}$',
-                'xmax': r'$m_{\max}$',
+                'scale': r'$\sigma_m$'
             },
-            'params_fix': {},
+            'params_fix': {'xmax': XMAX_FIX},
         },
         'PLS': {
             'model': pdfs.smoothed_powerlaw(),
             'param_latex': {
                 'alpha': r'$\alpha$',
                 'p': r'$p_m$',
-                'xmin': r'$m_{\min}^{\mathrm{PL}}$',
-                'xmax': r'$m_{\max}^{\mathrm{PL}}$'
             },
-            'params_fix': {},
+            'params_fix': {'xmax': XMAX_FIX},
         },
         'PLS_LVK': {
             'model': pdfs.LVK_Plancktaper_powerlaw(),
             'param_latex': {
                 'alpha': r'$\alpha$',
                 'delta': r'$\delta_m$',
-                'xmin': r'$m_{\min}^{\mathrm{PL}}$',
-                'xmax': r'$m_{\max}^{\mathrm{PL}}$'
             },
-            'params_fix': {},
+            'params_fix': {'xmax': XMAX_FIX},
         },
         'gauss': {
             'model': pdfs.gaussian(),
@@ -58,7 +83,7 @@ MODELS = {
                 'loc': r'$\mu_p$',
                 'scale': r'$\sigma_p$',
             },
-            'params_fix': {},
+            'params_fix': {'xmax': XMAX_FIX},
         }
     },
     'mass_ratio': {
@@ -127,14 +152,15 @@ MODELS = {
     }
 }
 PARAM_SCALES = { # characteristic scales for each parameter
-    'mass': 10,
-    'mass_ratio': 0.4,
-    'chi_eff': 0.2,
+    'mass_1_source': 8,
+    'mass_2_source': 8,
+    'mass_ratio': 0.25,
+    'chi_eff': 0.05,
 }
 
 ### MISC UTILS
 
-def check_min_separation(X, min_sep, xp=np):
+def check_min_separation(X, min_sep, xp=xp):
     """
     Checks for an input array of shape (..., M, N) that the minimum separation between the M points
     in N-dimensional space is at least min_sep. 
@@ -181,9 +207,57 @@ def unique_path(path: str | Path) -> Path:
             return candidate
         i += 1
 
+def skip_dunder(iter):
+    for x in iter:
+        if type(x) is str:
+            if not (x.startswith('__') or x.endswith('__')):
+                yield x
+
+def recursive_pad(datadict):
+    """
+    Adds one dimension to each array of a dictionary of arrays and subdictionaries of arrays,
+    to be broadcastable with another 1D array.
+    """
+    res = {}
+    for k, v in datadict.items():
+        if isinstance(v, dict):
+            res[k] = recursive_pad(v)
+        else:
+            v_ = xp.asarray(v)
+            if v_.size > 1:
+                res[k] = v_[..., None]
+            else:
+                res[k] = v_
+    
+    return res
+
+def recursive_get(datadict, key):
+    """
+    Recursively gets and concatenates all dict[key] for all subdictionaries of datadict, including itself.
+    Assumes that dict[key] are lists.
+    """
+    res = []
+    for k, v in datadict.items():
+        if k == key:
+            res.extend(v)
+        elif type(v) is dict:
+            res.extend(recursive_get(v, key))
+    return res
+
+def get_safe_fn(name):
+    return '_'.join(re.split(r'\W+', name))
+
 ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 ### POST-PROCESSING
+
+def leaf_active_mask(samples_loc):
+    """
+    Mask of active RJ leaves: finite and strictly positive rate column.
+    Assumes that the last column is the rate.
+    """
+    rate = samples_loc[..., -1]
+    return np.isfinite(rate) & (rate > 0)
 
 def get_integrated_act_wrap(samples, average=True, fast=False):
     """
@@ -201,10 +275,9 @@ def get_integrated_act_wrap(samples, average=True, fast=False):
     for name in samples.keys():
         chain = samples[name]
         nsteps, ntemps, nw, nl, ndims = chain.shape
-        nans = np.isnan(chain)
-        if np.any(nans):
+        if np.any(np.isnan(chain)) and nl > 1:
             #RJ branch - use number of active leaves to calculate autocorrelation time
-            n_active_leaves = np.count_nonzero(np.any(nans, axis=-1), axis=-1, keepdims=True)
+            n_active_leaves = np.count_nonzero(leaf_active_mask(chain), axis=-1, keepdims=True)
             tau_rj = get_integrated_act(n_active_leaves, average=average, fast=fast)
             if np.isfinite(tau_rj):
                 tau[name] = tau_rj
@@ -243,20 +316,143 @@ def get_discard_from_chain(logP):
 def textsc_ify(word: str) -> str:
     return f'$\\textsc{{{word}}}$'
 
-def plot_ppds(ax, x, ppds, color='k', CI=90, label=None, fill_alpha = 0.3, lw = 2, ls='-'):
+def plot_ppds(ax, x, ppds, color='k', CI=90, label=None, fill_alpha = 0.3, lw = 2, ls='-', swap_xy=False):
     if CI is None:
         for ppd in ppds: # plot individual ppds
             if np.any(ppd > 0):
-                ax.plot(x, ppd, color=color, alpha=0.1, lw=0.1)
+                if swap_xy:
+                    ax.plot(ppd, x, color=color, alpha=0.2, lw=0.1)
+                else:
+                    ax.plot(x, ppd, color=color, alpha=0.2, lw=0.1)
     
     else:
         dist = (100 - CI)/2
         percs = [dist, 50, 100 - dist]
         low, med, high = np.nanpercentile(ppds, percs, axis=0)
-        ax.plot(x, med, color = color, lw = lw, ls = ls)
+        if swap_xy:
+            ax.plot(med, x, color = color, lw = lw, ls = ls)
+        else:
+            ax.plot(x, med, color = color, lw = lw, ls = ls)
         if label is not None:
             label = textsc_ify(label)
-        ax.fill_between(x, low, high, color = color, alpha = fill_alpha, label=label)
+        
+        if swap_xy:
+            ax.fill_betweenx(x, low, high, color = color, alpha = fill_alpha, label=label)
+        else:
+            ax.fill_between(x, low, high, color = color, alpha = fill_alpha, label=label)
+
+def get_level_values(Z, percentiles):
+    """
+    Z: 2D array of non-negative weights (already on the plotting grid).
+    percentiles: iterable of fractions in (0, 1]; e.g. [0.5, 0.9, 0.99].
+ 
+    Returns contour levels you can pass to contour/contourf so that each
+    level encloses the requested fraction of the total probability mass.
+    """
+    Z = np.nan_to_num(Z, nan=0, posinf=0, neginf=0)
+    total = Z.sum()
+    if total <= 0:
+        raise ValueError("Z must have positive mass.")
+    Z /= total
+ 
+    flat = np.sort(Z.ravel())[::-1]    # highest densities first
+    cdf = np.cumsum(flat)
+    levels = []
+    for p in percentiles:
+        idx = np.searchsorted(cdf, p)
+        levels.append(flat[idx-1])
+    levels = levels[::-1] + [flat[0]]
+    # include largest positive value so outermost contour closes
+    return np.unique(levels) * total # scale back
+
+def _initialize_2D_plotting_axes(figsize=(10,10)):
+    fig = plt.figure(figsize=figsize)
+    gs = gridspec.GridSpec(
+        2, 2,
+        width_ratios=(4, 1),
+        height_ratios=(1, 4),
+        wspace=0.05,
+        hspace=0.05
+    )
+    ax_joint = fig.add_subplot(gs[1, 0])
+    ax_x = fig.add_subplot(gs[0, 0], sharex=ax_joint)
+    ax_y = fig.add_subplot(gs[1, 1], sharey=ax_joint)
+    return fig, ax_joint, ax_x, ax_y
+
+def plot_2D_contours_and_marginals(
+    xx, yy, x_marg_ppd, y_marg_ppd, p_xy_mean, color='cornflowerblue', axes=None, 
+    contour=True, CI=None, levels=(0.5, 0.9, 0.99), xlabel=None, ylabel=None,
+    x_param_ylog=False, y_param_ylog=False, x_param_ylim=None, y_param_ylim=None,
+    alpha=1, **plot_kwargs
+):
+
+    if axes is None:
+        fig, ax_joint, ax_x, ax_y = _initialize_2D_plotting_axes()
+    else:
+        fig, ax_joint, ax_x, ax_y = axes
+
+    plot_ppds(ax_x, xx, x_marg_ppd, color=color, CI=CI)
+    plot_ppds(ax_y, yy, y_marg_ppd, color=color, CI=CI, swap_xy=True)
+    # swap x and y for y param
+    
+    # construct colormap
+    base = pltc.to_rgba(color, alpha=alpha)
+    light = pltc.to_rgba(color, alpha=0.3*alpha)
+    cmap = pltc.LinearSegmentedColormap.from_list(
+        f'{str(color).capitalize()}s',
+        [light, base]
+    )
+    vmin, vmax = np.nanmin(p_xy_mean[p_xy_mean>0]), np.nanmax(p_xy_mean)
+    # extent = (xx[0], xx[-1], yy[0], yy[-1])
+    if contour:
+        contour_levels = get_level_values(p_xy_mean, levels)
+        X, Y = np.meshgrid(xx, yy) 
+        ax_joint.contourf(
+            X, Y, p_xy_mean.T,
+            levels=contour_levels,
+            cmap=cmap,
+            origin='lower',
+            **plot_kwargs
+        )
+        ax_joint.contour(
+            X, Y, p_xy_mean.T,
+            levels=contour_levels,
+            colors=color,
+            origin='lower',
+            alpha=alpha,
+            **plot_kwargs
+        )
+    else:
+        ax_joint.imshow(
+            p_xy_mean.T,
+            aspect='auto',
+            origin='lower',
+            cmap=cmap,
+            norm=pltc.LogNorm(vmin=vmin,vmax=vmax),
+            **plot_kwargs
+        )
+    ax_joint.set_xlabel(xlabel)
+    ax_joint.set_ylabel(ylabel)
+    ax_x.tick_params(axis="x", labelbottom=False)
+    ax_y.tick_params(axis="y", labelleft=False)
+
+    if x_param_ylog:
+        ax_x.set_yscale('log')
+        ref = np.nanpercentile(x_marg_ppd, 99)
+        ax_x.set_ylim(1e-4*ref, 2*ref)
+    else:
+        ax_x.set_ylim(bottom=0)
+    if y_param_ylog:
+        ax_y.set_xscale('log')
+        ref = np.nanpercentile(y_marg_ppd, 99)
+        ax_y.set_xlim(1e-4*ref, 2*ref)
+    else:
+        ax_y.set_xlim(left=0)
+    ax_x.set_ylim(x_param_ylim)
+    ax_y.set_xlim(y_param_ylim)
+
+    return fig, ax_joint, ax_x, ax_y
+    # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
 
 corner_defaults = dict(
     color='darkred',
@@ -301,6 +497,14 @@ plot_style = {
     "text.usetex": True
 }
 
+texnames = {
+    'mass_1_source': r'$m_1$',
+    'mass_2_source': r'$m_2$',
+    'mass_ratio': r'$q$',
+    'redshift': r'$z$',
+    'chi_eff': r'$\chi_\mathrm{eff}$'
+}
+
 def setup_and_plot_GWTC4(
     param_name, 
     ax, 
@@ -322,7 +526,7 @@ def setup_and_plot_GWTC4(
         ax.set_xlim(-0.35, 0.65)
         ax.axvline(0, ls='--', color='gray')
 
-    elif param_name == 'mass':
+    elif param_name == 'mass_1_source':
         if res is not None:
             x, y = pf.get_params(res, 'mass_1')
             if 'BSpline' in res.fname:
@@ -331,7 +535,7 @@ def setup_and_plot_GWTC4(
                 label = r'$\textsc{LVK BP2P}$'
         pf.setup_mass_plot(ax, grid_kwargs=dict(ls='dotted', color = 'k', alpha = 0), xrange=(2,100), yrange=(1e-3,40))
     
-    elif param_name == 'mass_2':
+    elif param_name == 'mass_2_source':
         pf.setup_mass_plot(ax, grid_kwargs=dict(ls='dotted', color = 'k', alpha = 0), xrange=(2,80), yrange=(1e-3,40))
         ax.set_xlabel(r"$m_2 \left[ \mathrm{M}_\odot \right]$")
         # don't plot LVK results

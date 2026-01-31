@@ -1,5 +1,6 @@
 scratch/
 .ipynb_checkpoints
+.vscode
 results/
 scripts/test*
 scripts/ref*
