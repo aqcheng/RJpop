@@ -612,7 +612,7 @@ class smoothed_powerlaw:
         C = x_{\min}^{1-\alpha} I_{1-x_{\min}/x_{\max}}(p+1, \alpha-1)
                     
     where I_u(a, b) is the incomplete beta function. Note that :math:`\alpha > 1`, since
-    computing the normalization for :math:`\alpha < 1` involves hypergeometric functions that are
+    computing the normalization for :math:`\alpha <= 1` involves hypergeometric functions that are
     not currently implemented by cupy.
     """
 
@@ -630,7 +630,7 @@ class smoothed_powerlaw:
         # need to multiply regularized incomplete beta by beta(a,b) to get the incomplete beta function
 
         return xp.where(
-            (x >= xmin) & (x <= xmax) & (C > 0) & (alpha >= 1),
+            (x >= xmin) & (x <= xmax) & (C > 0.0) & (alpha >= 1.0),
             (1/C) * xp.power(x, -alpha) * xp.power(1.0 - xmin / x, p),
             0.0
         )

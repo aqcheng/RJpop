@@ -20,6 +20,7 @@ from xp import xp
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 import matplotlib.colors as pltc
+from matplotlib.patches import Polygon
 
 import re
 
@@ -365,7 +366,7 @@ def get_level_values(Z, percentiles):
     # include largest positive value so outermost contour closes
     return np.unique(levels) * total # scale back
 
-def _initialize_2D_plotting_axes(figsize=(10,10)):
+def initialize_2D_plotting_axes(figsize=(10,10)):
     fig = plt.figure(figsize=figsize)
     gs = gridspec.GridSpec(
         2, 2,
@@ -387,7 +388,7 @@ def plot_2D_contours_and_marginals(
 ):
 
     if axes is None:
-        fig, ax_joint, ax_x, ax_y = _initialize_2D_plotting_axes()
+        fig, ax_joint, ax_x, ax_y = initialize_2D_plotting_axes()
     else:
         fig, ax_joint, ax_x, ax_y = axes
 
@@ -436,23 +437,53 @@ def plot_2D_contours_and_marginals(
     ax_x.tick_params(axis="x", labelbottom=False)
     ax_y.tick_params(axis="y", labelleft=False)
 
+    ref_x = np.nanpercentile(x_marg_ppd, 99)
+    ref_y = np.nanpercentile(y_marg_ppd, 99)
     if x_param_ylog:
         ax_x.set_yscale('log')
-        ref = np.nanpercentile(x_marg_ppd, 99)
-        ax_x.set_ylim(1e-4*ref, 2*ref)
+        ax_x.set_ylim(1e-4*ref_x, 3*ref_x)
     else:
-        ax_x.set_ylim(bottom=0)
+        ax_x.set_ylim(0, ref_x)
     if y_param_ylog:
         ax_y.set_xscale('log')
-        ref = np.nanpercentile(y_marg_ppd, 99)
-        ax_y.set_xlim(1e-4*ref, 2*ref)
+        ax_y.set_xlim(1e-4*ref_y, 3*ref_y)
     else:
-        ax_y.set_xlim(left=0)
+        ax_y.set_xlim(0, ref_y)
     ax_x.set_ylim(x_param_ylim)
     ax_y.set_xlim(y_param_ylim)
 
     return fig, ax_joint, ax_x, ax_y
     # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
+
+def shade_triangle(ax, plane='upper half', color="#e7e7e7"):
+    """
+    Shade the y>x (or y<x) half plane gray.
+    """
+
+    # after your imshow call
+    xmin, xmax = ax.get_xlim()
+    ymin, ymax = ax.get_ylim()
+
+    if plane.lower() == 'upper half':
+        coords = [(0, ymax), (0, 0), (xmax, ymax)]
+    elif plane.lower() == 'lower half':
+        coords = [(xmax, 0), (0, 0), (xmax, ymax)]
+
+    triangle = Polygon(
+        coords,
+        facecolor=color,          # light gray
+        edgecolor="none",
+        alpha=1.0,
+        label="m1m2-mask",
+        zorder = 3  # cover grid
+    )
+    ax.add_patch(triangle)
+
+    # ensure limits stay unchanged
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    return ax
 
 corner_defaults = dict(
     color='darkred',

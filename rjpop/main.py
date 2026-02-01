@@ -1538,8 +1538,8 @@ else:
 # construct grid for evaluating data
 ngrid = 101
 data_grid = {
-    'mass_1_source': np.linspace(2, 100, ngrid),
-    'mass_2_source': np.linspace(2, 100, ngrid),
+    'mass_1_source': np.linspace(2, 100, 5*ngrid),
+    'mass_2_source': np.linspace(2, 100, 5*ngrid),
     'mass_ratio': np.linspace(0, 1, ngrid),
     'chi_eff': np.linspace(-1, 1, ngrid),
     'redshift': np.linspace(0, 1.5, ngrid),
@@ -1714,9 +1714,13 @@ def plot_model_ppd(param_name, color_tot='cornflowerblue', use_labels=True):
             # save to dictionary
             dict_out[sig] = {}
             dict_out[f'{sig} rates'] = {}
-            for comp_label, ppd, rate in zip(comp_labels, ppd_by_comp, rate_by_comp):
-                dict_out[sig][comp_label] = utils.to_numpy(ppd)
-                dict_out[f'{sig} rates'][comp_label] = utils.to_numpy(rate)
+            if use_labels:
+                for comp_label, ppd, rate in zip(comp_labels, ppd_by_comp, rate_by_comp):
+                    dict_out[sig][comp_label] = utils.to_numpy(ppd)
+                    dict_out[f'{sig} rates'][comp_label] = utils.to_numpy(rate)
+            else: # save all components by their original RJ leaves
+                dict_out[sig] = utils.to_numpy(ppd_by_comp)
+                dict_out[f'{sig} rates'] = utils.to_numpy(rate_by_comp)
         
         # legend
         all_handles, all_labels = [], []
@@ -1799,12 +1803,9 @@ def _extract_marg_ppd(x_param, model_sig, comp_label=None):
         return ppds_dict[x_param]['ppd']
     else:
         if comp_label is None:
-            res = 0.
-            for comp_label in ppds_dict[x_param][model_sig].keys():
-                res = res + ppds_dict[x_param][model_sig][comp_label]
-            return res
-        elif comp_label in ppds_dict[x_param][model_sig]:
-            return ppds_dict[x_param][model_sig][comp_label]
+            return np.sum(ppds_dict[x_param][model_sig], axis=0)
+        elif comp_label in ppds_dict[f'{x_param}_labelled'][model_sig]:
+            return ppds_dict[f'{x_param}_labelled'][model_sig][comp_label]
         else:
             raise ValueError(f'Unrecognized component label {comp_label}')
 
@@ -1842,8 +1843,8 @@ def _compute_mass_ppds(x_param, y_param, model_sig=0):
     return mass_ppds
 
 def _plot_param_2D_contours_and_marginals(
-    x_param, y_param, model_sig, color='cornflowerblue', 
-    axes=None, comp_label=None, savefig=None, mass_ppds=None, **contour_kwargs
+    x_param, y_param, model_sig, color='cornflowerblue', axes=None,
+    comp_label=None, savefig=None, mass_ppds=None, return_pxy_mean=False, **contour_kwargs
 ):
     assert model_sig in ppds_dict['model_sigs'], f"model_name must be one of {ppds_dict['model_sigs']}"
     assert x_param in ppds_dict
@@ -1856,7 +1857,7 @@ def _plot_param_2D_contours_and_marginals(
     comp_labels = ppds_dict['comp_labels']['comp_names']
     comp_rates = draw_ctx['R02_labelled_draws'].T # (nsamples, ncomps) -> (ncomps, nsamples)
     model_sig_safe = utils.get_safe_fn(model_sig) # for saving plots
-    
+
     if x_param.startswith('mass') and y_param.startswith('mass') and mass_ppds is None: 
         # pre-compute mass ppds to save time in recursive calls
         mass_ppds = _compute_mass_ppds(x_param, y_param, model_sig)
@@ -1876,16 +1877,21 @@ def _plot_param_2D_contours_and_marginals(
         if isinstance(color, (list, sns.palettes._ColorPalette)) and len(color) >= ncomps:
             colors = color[:ncomps]
         else:
-            print('A color palette is required. Defaulting to `Set2`.')
-            colors = sns.color_palette('Set2', ncomps)
+            # get color palette from ppds_dict
+            colors = ppds_dict['comp_labels']['colors']
         
+        bad_idx = []
+        p_xy_mean_tot = 0.
         for idx in idx_order:
             comp_label, color, alpha = comp_labels[idx], colors[idx], comp_alphas[idx]
-            axes = _plot_param_2D_contours_and_marginals(
+            axes, p_xy_mean = _plot_param_2D_contours_and_marginals(
                 x_param, y_param, model_sig, color=color, alpha=alpha, savefig=None,
-                axes=axes, comp_label=comp_label, mass_ppds=mass_ppds, **contour_kwargs
+                axes=axes, comp_label=comp_label, mass_ppds=mass_ppds, return_pxy_mean=True, **contour_kwargs
             )
-        handles = [matplotlib.lines.Line2D([], [], color=colors[i], label=utils.textsc_ify(comp_labels[i].capitalize())) for i in range(ncomps)]
+            p_xy_mean_tot = p_xy_mean_tot + p_xy_mean
+            if np.all(np.isclose(p_xy_mean, 0.0, atol=1e-10)):
+                bad_idx.append(idx)
+        handles = [matplotlib.lines.Line2D([], [], color=colors[i], label=utils.textsc_ify(comp_labels[i].capitalize())) for i in range(ncomps) if i not in bad_idx]
         ax_x = axes[2]
         ax_x.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 1.05), ncol=ncomps)
 
@@ -1894,6 +1900,8 @@ def _plot_param_2D_contours_and_marginals(
                 savefig = f'contours2d_{x_param}_{y_param}_{model_sig_safe}_labelled.pdf'
             axes[0].savefig(os.path.join(figpath, savefig))
             print(f'Saved {savefig}')
+        if return_pxy_mean:
+            return axes, p_xy_mean
         return axes
 
     # want to plot marginals on the side
@@ -1940,12 +1948,24 @@ def _plot_param_2D_contours_and_marginals(
             ylabel = utils.texnames.get(y_param, y_param),
             **contour_kwargs
         )
+    
+    # plot m1m2 triangle if needed
+    if len(axes[1].patches) == 0: # no triangle yet
+        if x_param == 'mass_1_source' and y_param == 'mass_2_source':
+            axes[1] = shade_triangle(axes[1])
+        elif x_param == 'mass_2_source' and y_param == 'mass_1_source':
+            axes[1] = shade_triangle(axes[1], plane='lower half')
+
     if savefig:
         if not isinstance(savefig, str):
             suffix = 'tot' if comp_label is None else utils.get_safe_fn(comp_label)
             savefig = f'contours2d_{x_param}_{y_param}_{model_sig_safe}_{suffix}.pdf'
         axes[0].savefig(os.path.join(figpath, savefig))
         print(f'Saved {savefig}')
+
+    if return_pxy_mean:
+        return axes, p_xy_mean
+
     return axes
 
 # plot 2d contours of best model
