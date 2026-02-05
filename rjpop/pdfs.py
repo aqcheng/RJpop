@@ -1,12 +1,8 @@
-import numpy as np
 from abc import ABC, abstractmethod
 
+import numpy as np
 from astropy.cosmology import Planck15
-
-from xp import xp, special
-
-EPS = float( xp.finfo(xp.float64).eps * 2 )
-INF = float( xp.sqrt(xp.finfo(xp.float64).max) / 10 )
+from xp import EPS, INF, special, xp
 
 
 def trapz(y, x=None, dx=1.0, axis=-1):
@@ -81,48 +77,50 @@ def trapz(y, x=None, dx=1.0, axis=-1):
         ret = xp.add.reduce(product, axis)
     return ret
 
+
 def rescale(x, loc, scale):
     return (x - loc) / scale
+
 
 class dist(ABC):
     """
     Base class for distributions. Strictly speaking, only the _pdf method is necessary to implement
-    during inference. 
+    during inference.
     """
-    
+
     @staticmethod
     @abstractmethod
     def _pdf(x, *args, **kwargs):
         # The core PDF logic for the standard distribution (loc=0, scale=1)
         raise NotImplementedError
-    
+
     @staticmethod
     @abstractmethod
     def _logpdf(x, *args, **kwargs):
         # The core logpdf logic for the standard distribution
         raise NotImplementedError
-    
+
     # these are optional
     @staticmethod
     def _cdf(x, *args, **kwargs):
         raise NotImplementedError
-    
+
     @staticmethod
     def _logcdf(x, *args, **kwargs):
         raise NotImplementedError
-    
+
     @staticmethod
     def _ppf(x, *args, **kwargs):
         raise NotImplementedError
-    
+
     @classmethod
     def pdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._pdf((x - loc) / scale, *args, **kwargs) / scale
-    
+
     @classmethod
     def logpdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._logpdf((x - loc) / scale, *args, **kwargs) - xp.log(scale)
-    
+
     @classmethod
     def cdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._cdf((x - loc) / scale, *args, **kwargs)
@@ -130,106 +128,118 @@ class dist(ABC):
     @classmethod
     def logcdf(cls, x, *args, loc=0, scale=1, **kwargs):
         return cls._logcdf((x - loc) / scale, *args, **kwargs)
-    
+
     @classmethod
     def ppf(cls, q, *args, loc=0, scale=1, **kwargs):
         return cls._ppf(q, *args, **kwargs) * scale + loc
-    
+
     @staticmethod
     def _moments(*args, **kwargs):
         return 0.0, 0.0
-    
+
     @classmethod
     def moments(cls, *args, loc=0, scale=1, **kwargs):
-         mean, std = cls._moments(*args, **kwargs)
-         return mean * scale + loc, std * scale
+        mean, std = cls._moments(*args, **kwargs)
+        return mean * scale + loc, std * scale
+
 
 class trunc_dist(dist):
-
     @staticmethod
     @abstractmethod
     def _cdf(x, *args, **kwargs):
         # The core cdf logic for the standard distribution w/o limits. Required for trunc_dist
         raise NotImplementedError
-    
+
     @classmethod
     def pdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
 
-        pdf_unnorm = cls._pdf(rescale(x, loc, scale), *args, **kwargs) / scale * ((x >= xmin) & (x <= xmax))
+        pdf_unnorm = (
+            cls._pdf(rescale(x, loc, scale), *args, **kwargs) / scale * ((x >= xmin) & (x <= xmax))
+        )
 
         # normalize
         cdf_high = cls._cdf(rescale(xmax, loc, scale), *args, **kwargs) if xmax is not INF else 1
         cdf_low = cls._cdf(rescale(xmin, loc, scale), *args, **kwargs) if xmin is not -INF else 0
         norm = cdf_high - cdf_low
-        cdf_high, cdf_low = None, None # for memory
+        cdf_high, cdf_low = None, None  # for memory
 
-        norm[~(norm > 0)] = xp.inf # Guard against division by zero (degenerate truncation)
-        
+        norm[~(norm > 0)] = xp.inf  # Guard against division by zero (degenerate truncation)
+
         return pdf_unnorm / norm
-    
-    @classmethod 
+
+    @classmethod
     def logpdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
-        x_, xmin_, xmax_ = rescale(x, loc, scale), rescale(xmin, loc, scale), rescale(xmax, loc, scale)
+        x_, xmin_, xmax_ = (
+            rescale(x, loc, scale),
+            rescale(xmin, loc, scale),
+            rescale(xmax, loc, scale),
+        )
 
         logpdf_unnorm = xp.where(
-            (x < xmin) | (x > xmax),
-            -INF,
-            cls._logpdf(x_, *args, **kwargs) - xp.log(scale)
+            (x < xmin) | (x > xmax), -INF, cls._logpdf(x_, *args, **kwargs) - xp.log(scale)
         )
-        
+
         # normalize
         logcdf_high = xp.where(xmax >= INF, 0.0, cls._logcdf(xmax_, *args, **kwargs))
         logcdf_low = xp.where(xmin <= -INF, -INF, cls._logcdf(xmin_, *args, **kwargs))
-        log_norm = xp.logaddexp(
-            logcdf_high,
-            logcdf_low + xp.log(-1)
-        )
+        log_norm = xp.logaddexp(logcdf_high, logcdf_low + xp.log(-1))
         # Guard against log(0) and -INF - (-INF) (degenerate truncation)
         return xp.where(log_norm > 0, logpdf_unnorm - log_norm, -INF)
-    
+
     @classmethod
     def _get_minmax_quantiles(cls, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
         """
         Returns the quantiles of xmin and xmax given loc and scale.
         """
-        q_low = 0.0 if xmin is -INF else xp.clip(cls._cdf(rescale(xmin, loc, scale), *args, **kwargs), 0.0, 1 - EPS)
-        q_high = 1.0 if xmax is INF else xp.clip(cls._cdf(rescale(xmax, loc, scale), *args, **kwargs), EPS, 1.0)
+        q_low = (
+            0.0
+            if xmin is -INF
+            else xp.clip(cls._cdf(rescale(xmin, loc, scale), *args, **kwargs), 0.0, 1 - EPS)
+        )
+        q_high = (
+            1.0
+            if xmax is INF
+            else xp.clip(cls._cdf(rescale(xmax, loc, scale), *args, **kwargs), EPS, 1.0)
+        )
         return q_low, q_high
-    
+
     @classmethod
     def cdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
-        _q_low, _q_high = cls._get_minmax_quantiles(*args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs)
-        
+        _q_low, _q_high = cls._get_minmax_quantiles(
+            *args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs
+        )
+
         _q = cls._cdf(rescale(x, loc, scale), *args, **kwargs)
-        return xp.clip((_q - _q_low)/(_q_high - _q_low), 0.0, 1.0)
-    
+        return xp.clip((_q - _q_low) / (_q_high - _q_low), 0.0, 1.0)
+
     @classmethod
     def ppf(cls, q, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
-        _q_low, _q_high = cls._get_minmax_quantiles(*args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs)
-        
+        _q_low, _q_high = cls._get_minmax_quantiles(
+            *args, loc=loc, scale=scale, xmin=xmin, xmax=xmax, **kwargs
+        )
+
         _q = xp.clip(q * (_q_high - _q_low) + _q_low, EPS, 1 - EPS)
         return cls._ppf(_q, *args, **kwargs) * scale + loc
+
 
 def lnbetainc(a, b, x):
     x = xp.asarray(x, dtype=xp.float64)
     a = xp.asarray(x, dtype=xp.float64)
     b = xp.asarray(x, dtype=xp.float64)
-    
-    template = xp.empty(
-        xp.broadcast_shapes(a.shape, b.shape, x.shape),
-        dtype=xp.float64
-    )
 
-    small = x <= 10*EPS
-    big = x >= 1-10*EPS
+    template = xp.empty(xp.broadcast_shapes(a.shape, b.shape, x.shape), dtype=xp.float64)
+
+    small = x <= 10 * EPS
+    big = x >= 1 - 10 * EPS
 
     # assuming x is always the last axis
-    template[..., small] = a * xp.log(x[small]) - xp.log(a) - special.betaln(a,b)
-    template[..., big] = xp.log1p(-special.betainc(b, a, 1-x[big]))
+    template[..., small] = a * xp.log(x[small]) - xp.log(a) - special.betaln(a, b)
+    template[..., big] = xp.log1p(-special.betainc(b, a, 1 - x[big]))
 
     good = ~small & ~big
     template[..., good] = xp.log(special.betainc(a, b, x[good]))
     return template
+
 
 class jf_skew_t(trunc_dist):
     r"""
@@ -248,23 +258,23 @@ class jf_skew_t(trunc_dist):
     :math:`C_{a,b} = 2^{a+b-1}B(a,b)(a+b)^{1/2}`, and :math:`B` denotes the
     beta function (`scipy.special.beta`).
 
-    We reparameterize this with an overall tail weight parameter :math:`\alpha` 
+    We reparameterize this with an overall tail weight parameter :math:`\alpha`
     and skew parameter :math:`\log\kappa` such that
 
     .. math::
         \alpha =  a + b   \qquad   \kappa = \frac{a}{b}
-    
+
     Thus, the distribution is positively skewed when :math:`\log\kappa > 0`
     and negatively skewed when :math:`\log\kappa < 0`.
-    
+
     Then, we shift the distribution such that the mode is always at :math:`0`.
     The mode of the distribution is given by
-    
+
     .. math::
         m = \frac{(a - b) \sqrt{a + b}}{\sqrt{(2a + 1) (2b + 1)}}
-    
+
     Therefore, the pdf we use is given by
-    
+
     .. math::
         p(x; \alpha, \log\kappa) = f(x + m; a(\alpha, \kappa), b(\alpha, \kappa))
 
@@ -285,11 +295,11 @@ class jf_skew_t(trunc_dist):
         a = alpha * kappa / (1.0 + kappa)
         b = alpha / (1.0 + kappa)
         return a, b
-    
+
     @staticmethod
     def _reparam_and_shift(logalpha, logkappa):
         a, b = jf_skew_t._reparam(logalpha, logkappa)
-        mode = (a - b) * xp.sqrt(a + b) / xp.sqrt( (2*a + 1) * (2*b + 1) )
+        mode = (a - b) * xp.sqrt(a + b) / xp.sqrt((2 * a + 1) * (2 * b + 1))
         # x_ = x + mode # shift by mode
 
         return a, b, mode
@@ -299,7 +309,7 @@ class jf_skew_t(trunc_dist):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
 
         c = 2 ** (a + b - 1) * special.beta(a, b) * xp.sqrt(a + b)
-        u = (x + shift) / xp.sqrt(a + b + (x + shift)**2)
+        u = (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)
         result = (1 + u) ** (a + 0.5) * (1 - u) ** (b + 0.5) / c
         # Guard against NaN from 0/0 or inf/inf when c is degenerate
         return xp.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -307,28 +317,28 @@ class jf_skew_t(trunc_dist):
     @staticmethod
     def _logpdf(x, logalpha, logkappa):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
-        
+
         # Calculate the log of the normalization constant C
         # Use betaln for log(B(a,b)) to avoid underflow/overflow
         log_c = (a + b - 1) * xp.log(2) + special.betaln(a, b) + 0.5 * xp.log(a + b)
 
         # Pre-compute common terms
         # Clamp u to (-1+eps, 1-eps) to avoid log1p(-1)=-inf or log1p(1) issues at extreme x
-        u_raw = (x + shift) / xp.sqrt(a + b + (x + shift)**2)
+        u_raw = (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)
         u = xp.clip(u_raw, -1 + EPS, 1 - EPS)
         log_kernel = (a + 0.5) * special.log1p(u) + (b + 0.5) * special.log1p(-u)
 
         # Combine terms and adjust for the scale parameter
         return log_kernel - log_c
-    
+
     @staticmethod
     def _moments(logalpha, logkappa, **kwargs):
         """
         Returns the mode and a characteristic width via the Gaussian curvature variance
 
         .. math::
-            \sigma_z = \sqrt{ \frac{A(A+1)^4}{(4 a b+2 A+1)^3} 
-                              \left[ \frac{a+\frac{1}{2}}{(2 a+1)^2} + 
+            \sigma_z = \sqrt{ \frac{A(A+1)^4}{(4 a b+2 A+1)^3}
+                              \left[ \frac{a+\frac{1}{2}}{(2 a+1)^2} +
                                      \frac{b+\frac{1}{2}}{(2 b+1)^2} \right]^{-1} }
         """
         a, b = jf_skew_t._reparam(logalpha, logkappa)
@@ -338,28 +348,26 @@ class jf_skew_t(trunc_dist):
         u_star = (a - b) / (A + 1.0)
 
         denom = (
-            (1.0 - u_star**2)**3 *
-            (A + 1.0)**2 *
-            (
-                (a + 0.5) / (2.0 * a + 1.0)**2 +
-                (b + 0.5) / (2.0 * b + 1.0)**2
-            )
+            (1.0 - u_star**2) ** 3
+            * (A + 1.0) ** 2
+            * ((a + 0.5) / (2.0 * a + 1.0) ** 2 + (b + 0.5) / (2.0 * b + 1.0) ** 2)
         )
         var = A / denom
-        
-        return 0.0, xp.sqrt(var) # mode at 0 by definition
-    
+
+        return 0.0, xp.sqrt(var)  # mode at 0 by definition
+
     @staticmethod
     def _cdf(x, logalpha, logkappa):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
-        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift)**2)) * 0.5
+        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)) * 0.5
         return special.betainc(a, b, y)
-    
+
     @staticmethod
     def _logcdf(x, logalpha, logkappa):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
-        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift)**2)) * 0.5
+        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)) * 0.5
         return lnbetainc(a, b, y)
+
 
 class gaussian(trunc_dist):
     """
@@ -369,28 +377,29 @@ class gaussian(trunc_dist):
     @staticmethod
     def _logpdf(x):
         return -0.5 * x**2 - 0.5 * xp.log(2 * xp.pi)
-    
+
     @classmethod
     def _pdf(cls, x):
         return xp.exp(cls._logpdf(x))
-    
+
     @staticmethod
     def _cdf(x):
         return special.ndtr(x)
-    
+
     @staticmethod
     def _logcdf(x):
         return special.log_ndtr(x)
-    
+
     @staticmethod
     def _ppf(q):
         return special.ndtri(q)
-    
+
     @classmethod
     def moments(cls, loc=0, scale=1, xmin=-INF, xmax=INF):
         kwargs = dict(loc=loc, scale=scale, xmin=xmin, xmax=xmax)
-        return loc, (cls.ppf(0.84, **kwargs) - cls.ppf(0.16, **kwargs))/2
+        return loc, (cls.ppf(0.84, **kwargs) - cls.ppf(0.16, **kwargs)) / 2
         # ppf is already scaled
+
 
 class gen_gaussian(trunc_dist):
     """
@@ -400,29 +409,30 @@ class gen_gaussian(trunc_dist):
 
     @staticmethod
     def _pdf(x, beta):
-        res = beta / (2 * special.gamma(1./beta)) * xp.exp(-abs(x)**beta)
+        res = beta / (2 * special.gamma(1.0 / beta)) * xp.exp(-(abs(x) ** beta))
         return xp.nan_to_num(res, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
     def _logpdf(x, beta):
-        return xp.log(0.5*beta) - special.gammaln(1.0/beta) - abs(x)**beta
+        return xp.log(0.5 * beta) - special.gammaln(1.0 / beta) - abs(x) ** beta
 
     @staticmethod
     def _cdf(x, beta):
         c = 0.5 * xp.sign(x)
         # evaluating (.5 + c) first prevents numerical cancellation
-        return (0.5 + c) - c * special.gammaincc(1.0/beta, abs(x)**beta)
-    
+        return (0.5 + c) - c * special.gammaincc(1.0 / beta, abs(x) ** beta)
+
     @staticmethod
     def _logcdf(x, beta):
         out = xp.full_like(x, -INF, dtype=xp.float64)
-        log1p_term = xp.clip(special.gammainc(1./beta, abs(x)**beta), 0., 1.-EPS)
+        log1p_term = xp.clip(special.gammainc(1.0 / beta, abs(x) ** beta), 0.0, 1.0 - EPS)
         out = xp.log(0.5) + xp.log1p(xp.sign(x) * log1p_term)
         return out
-    
+
     @staticmethod
     def _moments(beta, **kwargs):
-        return 0.0, xp.sqrt(special.gamma(3/beta)/special.gamma(1/beta))
+        return 0.0, xp.sqrt(special.gamma(3 / beta) / special.gamma(1 / beta))
+
 
 class SGED(trunc_dist):
     r"""
@@ -463,7 +473,7 @@ class SGED(trunc_dist):
     @staticmethod
     def _lam_from_logkappa(logkappa):
         lam_L = 10**logkappa
-        lam_R = 10**(-logkappa)
+        lam_R = 10 ** (-logkappa)
         return lam_L, lam_R
 
     @staticmethod
@@ -472,24 +482,20 @@ class SGED(trunc_dist):
         norm = n / ((lam_L + lam_R) * special.gamma(1.0 / n))
 
         zL = (-x / lam_L) ** n
-        zR = ( x / lam_R) ** n
+        zR = (x / lam_R) ** n
 
         return norm * xp.where(x < 0, xp.exp(-zL), xp.exp(-zR))
 
     @staticmethod
     def _logpdf(x, n, logkappa):
         lam_L, lam_R = SGED._lam_from_logkappa(logkappa)
-        lognorm = (
-            xp.log(n)
-            - xp.log(lam_L + lam_R)
-            - special.gammaln(1.0 / n)
-        )
+        lognorm = xp.log(n) - xp.log(lam_L + lam_R) - special.gammaln(1.0 / n)
 
         zL = (-x / lam_L) ** n
-        zR = ( x / lam_R) ** n
+        zR = (x / lam_R) ** n
 
         return lognorm - xp.where(x < 0, zL, zR)
-    
+
     @staticmethod
     def _cdf(x, n, logkappa):
         lam_L, lam_R = SGED._lam_from_logkappa(logkappa)
@@ -497,7 +503,7 @@ class SGED(trunc_dist):
         wR = lam_R / (lam_L + lam_R)
 
         tL = (-x / lam_L) ** n
-        tR = ( x / lam_R) ** n
+        tR = (x / lam_R) ** n
 
         return xp.where(
             x < 0,
@@ -512,7 +518,7 @@ class SGED(trunc_dist):
         wR = lam_R / (lam_L + lam_R)
 
         tL = (-x / lam_L) ** n
-        tR = ( x / lam_R) ** n
+        tR = (x / lam_R) ** n
 
         cdf = xp.where(
             x < 0,
@@ -521,15 +527,18 @@ class SGED(trunc_dist):
         )
 
         return xp.log(xp.clip(cdf, EPS, 1.0))
-    
+
     @staticmethod
     def _moments(n, logkappa):
-        var = (special.gamma(3.0 / n) / special.gamma(1.0 / n)) * \
-              (10**(3*logkappa) + 10**(-3*logkappa)) / (10**logkappa + 10**(-logkappa))
+        var = (
+            (special.gamma(3.0 / n) / special.gamma(1.0 / n))
+            * (10 ** (3 * logkappa) + 10 ** (-3 * logkappa))
+            / (10**logkappa + 10 ** (-logkappa))
+        )
         return 0.0, xp.sqrt(var)
 
-class powerlaw:
 
+class powerlaw:
     @staticmethod
     def pdf(x, beta, xmin, xmax):
         r"""
@@ -539,7 +548,7 @@ class powerlaw:
 
         .. math::
             p(x) = \frac{1 + \beta}{x_\max^{1 + \beta} - x_\min^{1 + \beta}} x^\beta
-        
+
         Note the sign change from the smoothed power law, which is defined as x^{-\alpha}.
 
         Parameters
@@ -563,35 +572,37 @@ class powerlaw:
         beta = xp.atleast_1d(beta)
 
         # Compute normalization without materializing beta_, xmin_, xmax_
-        norm_beta_ne1 = (1.0 + beta) / (xmax**(1.0 + beta) - xmin**(1.0 + beta))
+        norm_beta_ne1 = (1.0 + beta) / (xmax ** (1.0 + beta) - xmin ** (1.0 + beta))
         norm = xp.where(beta == -1.0, 1.0 / log_ratio, norm_beta_ne1)
 
         prob = xp.power(x, beta)
-        prob *= norm                   
-        prob *= (x <= xmax) & (x >= xmin)  
+        prob *= norm
+        prob *= (x <= xmax) & (x >= xmin)
 
         return prob
-    
+
     @staticmethod
     def cdf(x, beta, xmin, xmax):
         log_ratio = xp.log(xmax / xmin)
         beta = xp.atleast_1d(beta)
         a = 1.0 + beta
         x_clipped = xp.clip(x, xmin, xmax)
-        cdf_ne1 = (xp.power(x_clipped, a) - xp.power(xmin, a)) / (xp.power(xmax, a) - xp.power(xmin, a))
+        cdf_ne1 = (xp.power(x_clipped, a) - xp.power(xmin, a)) / (
+            xp.power(xmax, a) - xp.power(xmin, a)
+        )
         cdf_beta_m1 = xp.log(x_clipped / xmin) / log_ratio
         cdf_inner = xp.where(beta == -1.0, cdf_beta_m1, cdf_ne1)
         return xp.where(x <= xmin, 0.0, xp.where(x >= xmax, 1.0, cdf_inner))
-    
+
     @staticmethod
     def ppf(q, beta, xmin, xmax):
         a = 1.0 + beta
         return xp.where(
             beta == -1.0,
-            xmin * (xmax / xmin)**q,
-            xp.power((xmax**a - xmin**a)*q + xmin**a, 1/a)
+            xmin * (xmax / xmin) ** q,
+            xp.power((xmax**a - xmin**a) * q + xmin**a, 1 / a),
         )
-    
+
     @classmethod
     def moments(cls, beta, xmin, xmax):
         kwargs = dict(beta=beta, xmin=xmin, xmax=xmax)
@@ -599,8 +610,8 @@ class powerlaw:
         width = med - cls.ppf(0.16, **kwargs)
         return med, width
 
-class smoothed_powerlaw:
 
+class smoothed_powerlaw:
     """
     Implements the power-law distribution with minimum, maximum, and lower-end smoothing.
     This is a different smoothing function from LVK s.t. the smoothing function is integrable.
@@ -608,9 +619,9 @@ class smoothed_powerlaw:
     .. math::
 
         f(x; \alpha, x_{\min}, x_{\max}, p) = (1/C) x^{-\alpha} \left(1 - \frac{x_{\min}}{x} \right)^p
-        
+
         C = x_{\min}^{1-\alpha} I_{1-x_{\min}/x_{\max}}(p+1, \alpha-1)
-                    
+
     where I_u(a, b) is the incomplete beta function. Note that :math:`\alpha > 1`, since
     computing the normalization for :math:`\alpha <= 1` involves hypergeometric functions that are
     not currently implemented by cupy.
@@ -626,15 +637,15 @@ class smoothed_powerlaw:
         a = p + 1
         b = alpha - 1
 
-        C = xp.power(xmin, 1 - alpha) * special.betainc(a, b, u) * special.beta(a,b)  
+        C = xp.power(xmin, 1 - alpha) * special.betainc(a, b, u) * special.beta(a, b)
         # need to multiply regularized incomplete beta by beta(a,b) to get the incomplete beta function
 
         return xp.where(
             (x >= xmin) & (x <= xmax) & (C > 0.0) & (alpha >= 1.0),
-            (1/C) * xp.power(x, -alpha) * xp.power(1.0 - xmin / x, p),
-            0.0
+            (1 / C) * xp.power(x, -alpha) * xp.power(1.0 - xmin / x, p),
+            0.0,
         )
-    
+
     @staticmethod
     def cdf(x, alpha, xmin, xmax, p):
 
@@ -652,11 +663,7 @@ class smoothed_powerlaw:
 
         F = special.betainc(a, b, u) / I_max
 
-        return xp.where(
-            x < xmin,
-            0.0,
-            xp.where(x > xmax, 1.0, F)
-        )
+        return xp.where(x < xmin, 0.0, xp.where(x > xmax, 1.0, F))
 
     @staticmethod
     def ppf(q, alpha, xmin, xmax, p):
@@ -676,142 +683,124 @@ class smoothed_powerlaw:
         x = xmin / (1.0 - u)
 
         return xp.clip(x, xmin, xmax)
-    
+
     @staticmethod
     def logpdf(x, alpha, xmin, xmax, p):
 
         x = xp.asarray(x)
-        
+
         u = 1 - xmin / xmax
         a = p + 1
         b = alpha - 1
 
-        lnIu = lnbetainc(a, b, u) + special.betaln(a,b)  # stable for large/small params
-        lnC = (1-alpha) * xp.log(xmin) + lnIu
+        lnIu = lnbetainc(a, b, u) + special.betaln(a, b)  # stable for large/small params
+        lnC = (1 - alpha) * xp.log(xmin) + lnIu
 
         # Use safe ratio to avoid log(0)
         ratio = xp.clip(xmin / x, 0, 1 - EPS)
-        
+
         # Main terms
         return xp.where(
-            (x >= xmin) & (x <= xmax),
-            -alpha * xp.log(x) + p * xp.log1p(-ratio) - lnC,
-            -INF
+            (x >= xmin) & (x <= xmax), -alpha * xp.log(x) + p * xp.log1p(-ratio) - lnC, -INF
         )
-    
+
     @classmethod
     def moments(cls, alpha, xmin, xmax, p):
         # use mode for first moment, quantiles for width (approximated w/o low end smoothing)
-        mode = xmin * (1 + p/alpha)
-        width = (powerlaw.ppf(0.84, -alpha, xmin, xmax) - powerlaw.ppf(0.16, -alpha, xmin, xmax)) / 2 
+        mode = xmin * (1 + p / alpha)
+        width = (
+            powerlaw.ppf(0.84, -alpha, xmin, xmax) - powerlaw.ppf(0.16, -alpha, xmin, xmax)
+        ) / 2
         return mode, width
 
+
 def sigmoid_smooth(x, xmin, delta):
-    eps = delta/xp.log(INF) # for numerical stability
+    eps = delta / xp.log(INF)  # for numerical stability
     x_safe = xp.where(
-        x < xmin + eps, 
-        xmin + eps, 
-        xp.where(
-            x > xmin + delta - eps,
-            xmin + delta - eps,
-            x
-        )
+        x < xmin + eps, xmin + eps, xp.where(x > xmin + delta - eps, xmin + delta - eps, x)
     )
-    return 1. / (1. + xp.exp(delta/(x_safe - xmin) + delta/(x_safe - xmin - delta)))
+    return 1.0 / (1.0 + xp.exp(delta / (x_safe - xmin) + delta / (x_safe - xmin - delta)))
+
 
 def log_sigmoid_smooth(x, xmin, delta):
     """
-    Sigmoid low-mass tapering function. See 
+    Sigmoid low-mass tapering function. See
     https://arxiv.org/pdf/2111.03634 Eqs. (B5), (B6)
     """
-    eps = delta/xp.log(INF) # for numerical stability
+    eps = delta / xp.log(INF)  # for numerical stability
     x_safe = xp.where(
-        x < xmin + eps, 
-        xmin + eps, 
-        xp.where(
-            x > xmin + delta - eps,
-            xmin + delta - eps,
-            x
-        )
+        x < xmin + eps, xmin + eps, xp.where(x > xmin + delta - eps, xmin + delta - eps, x)
     )
-    return -xp.log1p(xp.exp(delta/(x_safe - xmin) + delta/(x_safe - xmin - delta)))
+    return -xp.log1p(xp.exp(delta / (x_safe - xmin) + delta / (x_safe - xmin - delta)))
+
 
 class LVK_Plancktaper_powerlaw(dist):
     """
     Implements the power-law distribution with Planck-tapered lower end, as used by the LVK.
     """
 
-    var_names = ['alpha', 'xmin', 'xmax', 'delta']
+    var_names = ["alpha", "xmin", "xmax", "delta"]
 
     @staticmethod
     def _unnorm_pdf(x, alpha, xmin, xmax, delta):
         return xp.where(
-            (x > xmin) & (x < xmax),
-            xp.power(x, -alpha) * sigmoid_smooth(x, xmin, delta),
-            0
+            (x > xmin) & (x < xmax), xp.power(x, -alpha) * sigmoid_smooth(x, xmin, delta), 0
         )
-    
+
     @staticmethod
     def _unnorm_logpdf(x, alpha, xmin, xmax, delta):
         return xp.where(
-            (x > xmin) & (x < xmax),
-            -alpha * xp.log(x) + log_sigmoid_smooth(x, xmin, delta),
-            -INF
+            (x > xmin) & (x < xmax), -alpha * xp.log(x) + log_sigmoid_smooth(x, xmin, delta), -INF
         )
 
     @classmethod
     def _pdf(cls, x, alpha, xmin, xmax, delta, xx_int=None):
         pdf_unnorm = cls._unnorm_pdf(x, alpha, xmin, xmax, delta)
 
-        # compute normalization - assumes x is the last dimension 
+        # compute normalization - assumes x is the last dimension
         if xx_int is None:
-            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256) 
-        
-        norm = xp.trapz(
-            cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta),
-            xx_int,
-            axis=-1
-        )
+            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
+
+        norm = xp.trapz(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
 
         if xp.asarray(norm).ndim > 0:
-            norm = norm[:,None]
+            norm = norm[:, None]
 
         return pdf_unnorm / norm
-    
+
     @classmethod
     def _logpdf(cls, x, alpha, xmin, xmax, delta, xx_int=None):
         logpdf_unnorm = cls._unnorm_logpdf(x, alpha, xmin, xmax, delta)
 
-        # compute normalization - assumes x is the last dimension 
+        # compute normalization - assumes x is the last dimension
         if xx_int is None:
-            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256) 
-        
-        norm = xp.trapz(
-            cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta),
-            xx_int,
-            axis=-1
-        )[:,None]
+            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
+
+        norm = xp.trapz(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)[
+            :, None
+        ]
         return logpdf_unnorm - xp.log(norm)
+
 
 _mm = xp.linspace(2, 100, 512)
 _dm = _mm[1] - _mm[0]
 
+
 class MassModel:
-    
     @abstractmethod
     def pdf(self, data, **kwargs):
         """
         For consistency (especially with PE priors), always return p(m1, q) regardless of model.
         """
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_marginal_pdf(self, param_vals, param, *args, **kwargs):
         """
         Return marginalized p(param). Allowed values of param: 'mass_1_source', 'mass_ratio', 'mass_2_source'
         """
         raise NotImplementedError
-    
+
     @abstractmethod
     def moments(self, *args, **kwargs) -> dict:
         """
@@ -819,64 +808,71 @@ class MassModel:
         """
         raise NotImplementedError
 
-class m1_q_model(MassModel):
 
+class m1_q_model(MassModel):
     def __init__(self, mass_1_source_model: dist, mass_ratio_model: dist):
         self.m1_model = mass_1_source_model
         self.q_model = mass_ratio_model
-    
-    params = ('mass_1_source', 'mass_ratio')
-    
-    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
-        if 'xmax' not in mass_ratio_kwargs:
-            mass_ratio_kwargs['xmax'] = 1.0
-        return self.q_model.pdf(
-            data['mass_ratio'], 
-            xmin=mass_1_source_kwargs['xmin']/data['mass_1_source'], 
-            **mass_ratio_kwargs
-        )
-    
-    def _p_q(self, q, mass_1_source_kwargs, mass_ratio_kwargs):
-        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
-        data_flat = {'mass_ratio': qq.ravel(), 'mass_1_source': mm1.ravel()}
 
-        p_m_q = self.pdf(data_flat, mass_1_source_kwargs=mass_1_source_kwargs, mass_ratio_kwargs=mass_ratio_kwargs)
+    params = ("mass_1_source", "mass_ratio")
+
+    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
+        if "xmax" not in mass_ratio_kwargs:
+            mass_ratio_kwargs["xmax"] = 1.0
+        return self.q_model.pdf(
+            data["mass_ratio"],
+            xmin=mass_1_source_kwargs["xmin"] / data["mass_1_source"],
+            **mass_ratio_kwargs,
+        )
+
+    def _p_q(self, q, mass_1_source_kwargs, mass_ratio_kwargs):
+        qq, mm1 = xp.meshgrid(q, _mm, indexing="ij", copy=False)
+        data_flat = {"mass_ratio": qq.ravel(), "mass_1_source": mm1.ravel()}
+
+        p_m_q = self.pdf(
+            data_flat,
+            mass_1_source_kwargs=mass_1_source_kwargs,
+            mass_ratio_kwargs=mass_ratio_kwargs,
+        )
         p_m_q = p_m_q.reshape(p_m_q.shape[:-1] + (len(q), len(_mm)))
 
         return xp.sum(p_m_q, axis=-1) * _dm
-    
-    def _p_m2(self, m2, mass_1_source_kwargs, mass_ratio_kwargs):
-        mm2, mm1 = xp.meshgrid(m2, _mm, indexing='ij')
-        qq = mm2 / mm1
-        data_flat = {'mass_ratio': qq.ravel(), 'mass_1_source': mm1.ravel()}
 
-        p_m_q = self.pdf(data_flat, mass_1_source_kwargs=mass_1_source_kwargs, mass_ratio_kwargs=mass_ratio_kwargs)
-        p_m1_m2 = p_m_q.reshape(p_m_q.shape[:-1]+(len(m2), len(_mm))) / _mm
+    def _p_m2(self, m2, mass_1_source_kwargs, mass_ratio_kwargs):
+        mm2, mm1 = xp.meshgrid(m2, _mm, indexing="ij")
+        qq = mm2 / mm1
+        data_flat = {"mass_ratio": qq.ravel(), "mass_1_source": mm1.ravel()}
+
+        p_m_q = self.pdf(
+            data_flat,
+            mass_1_source_kwargs=mass_1_source_kwargs,
+            mass_ratio_kwargs=mass_ratio_kwargs,
+        )
+        p_m1_m2 = p_m_q.reshape(p_m_q.shape[:-1] + (len(m2), len(_mm))) / _mm
         return xp.sum(p_m1_m2, axis=-1) * _dm
-    
+
     def get_marginal_pdf(self, param_vals, param, mass_1_source_kwargs, mass_ratio_kwargs):
-        if param == 'mass_1_source':
+        if param == "mass_1_source":
             return self.m1_model.pdf(param_vals, **mass_1_source_kwargs)
-        elif param == 'mass_ratio':
+        elif param == "mass_ratio":
             return self._p_q(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
-        elif param == 'mass_2_source':
+        elif param == "mass_2_source":
             return self._p_m2(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
         else:
             raise ValueError(f"Unknown parameter {param}")
 
     def pdf(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
-        return self.m1_model.pdf(data['mass_1_source'], **mass_1_source_kwargs) * \
-               self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs)
-    
+        return self.m1_model.pdf(
+            data["mass_1_source"], **mass_1_source_kwargs
+        ) * self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs)
+
     def moments(self, mass_1_source_kwargs, mass_ratio_kwargs):
-        mass_ratio_kwargs['xmin'] = 0.0
-        mass_ratio_kwargs['xmax'] = 1.0
+        mass_ratio_kwargs["xmin"] = 0.0
+        mass_ratio_kwargs["xmax"] = 1.0
         m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
         q_mu, q_std = self.q_model.moments(**mass_ratio_kwargs)
-        return {
-            'mass_1_source': (m1_mu, m1_std),
-            'mass_ratio': (q_mu, q_std)
-        }
+        return {"mass_1_source": (m1_mu, m1_std), "mass_ratio": (q_mu, q_std)}
+
 
 # class Mc_q_model(MassModel):
 
@@ -884,23 +880,24 @@ class m1_q_model(MassModel):
 #         self.Mc_model = Mc_model
 #         self.q_model = q_model
 
+
 def gaussian_copula(u, v, rho):
     """
     Implements the Gaussian copula
 
     .. math::
-        c_\rho(u, v) = \frac{1}{\sqrt{1-\rho^2}} 
+        c_\rho(u, v) = \frac{1}{\sqrt{1-\rho^2}}
                     \exp \left(\frac{2 \rho z_1 z_2-\rho^2 (z_1^2+z_2^2)}{2(1-\rho^2)}\right)
-    
+
     where :math: `z_i=\Phi^{-1}(u_i)`.
-    
+
     Parameters
     ----------
     rho : float
         Correlation parameter.
     u, v : array-like
         The CDF values of the marginals.
-    
+
     Returns
     -------
     array-like
@@ -909,30 +906,32 @@ def gaussian_copula(u, v, rho):
 
     z1 = xp.clip(special.ndtri(u), -INF, INF)
     z2 = xp.clip(special.ndtri(v), -INF, INF)
-    return xp.exp(
-        (2*rho*z1*z2 - rho**2*(z1**2 + z2**2)) / (2*(1.0 - rho**2))
-    ) / xp.sqrt(1.0 - rho**2)
+    return xp.exp((2 * rho * z1 * z2 - rho**2 * (z1**2 + z2**2)) / (2 * (1.0 - rho**2))) / xp.sqrt(
+        1.0 - rho**2
+    )
+
 
 def _check_gaussian_copula_params(m1, m2, rho):
     return (m1 >= m2) * (rho > -1) * (rho < 1)
+
 
 class gaussian_copula_mass_model(MassModel):
     def __init__(self, mass_1_source_model: dist, mass_2_source_model: dist):
         self.m1_model = mass_1_source_model
         self.m2_model = mass_2_source_model
-    
-    params = ('mass_1_source', 'mass_2_source')
-    
+
+    params = ("mass_1_source", "mass_2_source")
+
     _zz = xp.linspace(-5, 5, 256)
     _dz = _zz[1] - _zz[0]
-    
+
     def _compute_norm(self, rho, mass_1_source_kwargs, mass_2_source_kwargs):
-        """
+        r"""
         Computes P(m2 <= m1), which is the normalization of the joint pdf.
         For the Gaussian copula, this is the integral
 
         .. math::
-            P (m_2 < m_1) = \int_{-\infty}^{\infty} \phi\left(z_1\right) 
+            P (m_2 < m_1) = \int_{-\infty}^{\infty} \phi\left(z_1\right)
             \Phi\left(\frac{\Phi^{-1}\left(F_2\left(F_1^{-1}\left(\Phi\left(z_1\right)\right)\right)\right)-\rho z_1}{\sqrt{1-\rho^2}}\right) \, dz_1
         """
 
@@ -947,60 +946,62 @@ class gaussian_copula_mass_model(MassModel):
         integrand = gaussian._pdf(self._zz) * special.ndtr(arg)
 
         return xp.sum(integrand) * self._dz
-    
+
     def pdf(self, data, rho, mass_1_source_kwargs, mass_2_source_kwargs):
-        
-        m1, m2 = data['mass_1_source'], data['mass_2_source']
+
+        m1, m2 = data["mass_1_source"], data["mass_2_source"]
 
         u = self.m1_model.cdf(m1, **mass_1_source_kwargs)
         v = self.m2_model.cdf(m2, **mass_2_source_kwargs)
         norm = self._compute_norm(rho, mass_1_source_kwargs, mass_2_source_kwargs)
 
-        jacobian = m1 # P(m1, m2) -> P(m1, q)
-        
-        res = self.m1_model.pdf(m1, **mass_1_source_kwargs) * \
-              self.m2_model.pdf(m2, **mass_2_source_kwargs) * \
-              gaussian_copula(u, v, rho)  / norm * jacobian * \
-              _check_gaussian_copula_params(m1, m2, rho)
-        
+        jacobian = m1  # P(m1, m2) -> P(m1, q)
+
+        res = (
+            self.m1_model.pdf(m1, **mass_1_source_kwargs)
+            * self.m2_model.pdf(m2, **mass_2_source_kwargs)
+            * gaussian_copula(u, v, rho)
+            / norm
+            * jacobian
+            * _check_gaussian_copula_params(m1, m2, rho)
+        )
+
         return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
-    
+
     @staticmethod
     def _check_params(m1, m2, rho):
         return (m1 >= m2) * (rho > -1) * (rho < 1)
 
     def _p_q(self, q, mass_1_source_kwargs, mass_2_source_kwargs, rho):
-        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
+        qq, mm1 = xp.meshgrid(q, _mm, indexing="ij", copy=False)
         mm2 = mm1 * qq
-        data_flat = {'mass_1_source': mm1.ravel(), 'mass_2_source': mm2.ravel()}
+        data_flat = {"mass_1_source": mm1.ravel(), "mass_2_source": mm2.ravel()}
 
         p_m1_q = self.pdf(data_flat, rho, mass_1_source_kwargs, mass_2_source_kwargs)
         p_m1_q = p_m1_q.reshape(p_m1_q.shape[:-1] + (len(q), len(_mm)))
         return xp.nansum(p_m1_q, axis=-1) * _dm
-    
+
     def get_marginal_pdf(self, param_vals, param, rho, mass_1_source_kwargs, mass_2_source_kwargs):
-        if param == 'mass_1_source':
+        if param == "mass_1_source":
             return self.m1_model.pdf(param_vals, **mass_1_source_kwargs)
-        elif param == 'mass_ratio':
+        elif param == "mass_ratio":
             return self._p_q(param_vals, mass_1_source_kwargs, mass_2_source_kwargs, rho)
-        elif param == 'mass_2_source':
+        elif param == "mass_2_source":
             return self.m2_model.pdf(param_vals, **mass_2_source_kwargs)
         else:
             raise ValueError(f"Unknown parameter {param}")
-    
+
     def moments(self, mass_1_source_kwargs, mass_ratio_kwargs, rho):
         m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
         m2_mu, m2_std = self.m2_model.moments(**mass_ratio_kwargs)
-        return {
-            'mass_1_source': (m1_mu, m1_std),
-            'mass_2_source': (m2_mu, m2_std)
-        }
+        return {"mass_1_source": (m1_mu, m1_std), "mass_2_source": (m2_mu, m2_std)}
+
 
 class sym_gaussian_copula_mass_model(MassModel):
-    """
+    r"""
     Gaussian copula mass model, but assumes that all masses are drawn from the same
     distribution X ~ p(m) with some pairing function (copula). From here we derive
-    the expressions for the distrbituions of :math:`m_1 = \max(X_1, X_2)` and 
+    the expressions for the distrbituions of :math:`m_1 = \max(X_1, X_2)` and
     :math:`m_2 = \min(X_1, X_2)`.
 
     In these functions `mass_1_source_model` and `mass_1_source_kwargs` refers to the
@@ -1009,9 +1010,9 @@ class sym_gaussian_copula_mass_model(MassModel):
 
     def __init__(self, mass_1_source_model: dist):
         self.m_model = mass_1_source_model
-    
-    params = ('mass_1_source', 'mass_2_source')
-    
+
+    params = ("mass_1_source", "mass_2_source")
+
     def pdf(self, data, rho, mass_1_source_kwargs):
         r"""
         Evaluates the joint density
@@ -1021,21 +1022,25 @@ class sym_gaussian_copula_mass_model(MassModel):
 
         where :math:`c_\rho(u,v)` is the Gaussian copula density.
         """
-        
-        m1, m2 = data['mass_1_source'], data['mass_2_source']
+
+        m1, m2 = data["mass_1_source"], data["mass_2_source"]
 
         u = self.m_model.cdf(m1, **mass_1_source_kwargs)
         v = self.m_model.cdf(m2, **mass_1_source_kwargs)
 
-        jacobian = m1 # P(m1, m2) -> P(m1, q)
-        
-        res = self.m_model.pdf(m1, **mass_1_source_kwargs) * \
-              self.m_model.pdf(m2, **mass_1_source_kwargs) * \
-              gaussian_copula(u, v, rho)  * 2 * jacobian * \
-              _check_gaussian_copula_params(m1, m2, rho)
-        
+        jacobian = m1  # P(m1, m2) -> P(m1, q)
+
+        res = (
+            self.m_model.pdf(m1, **mass_1_source_kwargs)
+            * self.m_model.pdf(m2, **mass_1_source_kwargs)
+            * gaussian_copula(u, v, rho)
+            * 2
+            * jacobian
+            * _check_gaussian_copula_params(m1, m2, rho)
+        )
+
         return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
-    
+
     def _p_m1(self, m1, rho, mass_1_source_kwargs):
         r"""
         Evaluates the marginal distribution
@@ -1043,9 +1048,11 @@ class sym_gaussian_copula_mass_model(MassModel):
         .. math::
             p(m_1) = 2 f(m_1) \Phi\ \left(\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_1))\right)
         """
-        arg = xp.sqrt((1.-rho)/(1.+rho)) * special.ndtri(self.m_model.cdf(m1, **mass_1_source_kwargs))
+        arg = xp.sqrt((1.0 - rho) / (1.0 + rho)) * special.ndtri(
+            self.m_model.cdf(m1, **mass_1_source_kwargs)
+        )
         return 2 * self.m_model.pdf(m1, **mass_1_source_kwargs) * special.ndtr(arg)
-    
+
     def _p_m2(self, m2, rho, mass_1_source_kwargs):
         r"""
         Evaluates the marginal distribution
@@ -1053,55 +1060,60 @@ class sym_gaussian_copula_mass_model(MassModel):
         .. math::
             p(m_2) = 2 f(m_2) \Phi\ \left(-\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_2))\right)
         """
-        arg = xp.sqrt((1.-rho)/(1.+rho)) * special.ndtri(self.m_model.cdf(m2, **mass_1_source_kwargs))
+        arg = xp.sqrt((1.0 - rho) / (1.0 + rho)) * special.ndtri(
+            self.m_model.cdf(m2, **mass_1_source_kwargs)
+        )
         return 2 * self.m_model.pdf(m2, **mass_1_source_kwargs) * special.ndtr(-arg)
-    
+
     def _p_q(self, q, rho, mass_1_source_kwargs):
-        qq, mm1 = xp.meshgrid(q, _mm, indexing='ij', copy=False)
+        qq, mm1 = xp.meshgrid(q, _mm, indexing="ij", copy=False)
         mm2 = mm1 * qq
-        data_flat = {'mass_1_source': mm1.ravel(), 'mass_2_source': mm2.ravel()}
+        data_flat = {"mass_1_source": mm1.ravel(), "mass_2_source": mm2.ravel()}
 
         p_m1_q = self.pdf(data_flat, rho, mass_1_source_kwargs)
         p_m1_q = p_m1_q.reshape(p_m1_q.shape[:-1] + (len(q), len(_mm)))
         return xp.nansum(p_m1_q, axis=-1) * _dm
-    
+
     def get_marginal_pdf(self, param_vals, param, rho, mass_1_source_kwargs):
-        if param == 'mass_1_source':
+        if param == "mass_1_source":
             return self._p_m1(param_vals, rho, mass_1_source_kwargs)
-        elif param == 'mass_ratio':
+        elif param == "mass_ratio":
             return self._p_q(param_vals, rho, mass_1_source_kwargs)
-        elif param == 'mass_2_source':
+        elif param == "mass_2_source":
             return self._p_m2(param_vals, rho, mass_1_source_kwargs)
         else:
             raise ValueError(f"Unknown parameter {param}")
-    
+
     def moments(self, mass_1_source_kwargs, rho):
         m_mu, m_std = self.m_model.moments(**mass_1_source_kwargs)
-        return {'mass_1_source': (m_mu, m_std)}
+        return {"mass_1_source": (m_mu, m_std)}
+
 
 ###################
 # Rate models
 ###################
 
-class BaseRate:
 
+class BaseRate:
     def __init__(self, cosmo=Planck15):
         self.cosmo = cosmo
-        
+
         z_arr = np.concatenate([np.linspace(EPS, 3, 256, endpoint=False), np.linspace(3, 10, 50)])
-        dV_dz_arr = 4*np.pi * self.cosmo.differential_comoving_volume(z_arr).value / 1e9 # in Gpc^3
+        dV_dz_arr = (
+            4 * np.pi * self.cosmo.differential_comoving_volume(z_arr).value / 1e9
+        )  # in Gpc^3
         self._z_arr = xp.asarray(z_arr)
         self._dV_dz_arr = xp.asarray(dV_dz_arr)
         self._log_dV_dz_arr = xp.log(self._dV_dz_arr)
-    
+
     def dV_dz(self, z):
         return xp.interp(z, self._z_arr, self._dV_dz_arr, left=0, right=0)
-    
+
     def log_dV_dz(self, z):
         return xp.interp(z, self._z_arr, self._log_dV_dz_arr, left=-INF, right=-INF)
-    
-    @abstractmethod 
-    def psi(self,z, *args, **kwargs):
+
+    @abstractmethod
+    def psi(self, z, *args, **kwargs):
         """
         Rate model, normalized such that psi(0)=1.
         """
@@ -1115,36 +1127,36 @@ class BaseRate:
         raise NotImplementedError
 
     def pdf(self, z, *args, **kwargs):
-        return self.psi(z, *args, **kwargs) / (1.+ z) * self.dV_dz(z)
+        return self.psi(z, *args, **kwargs) / (1.0 + z) * self.dV_dz(z)
 
     def logpdf(self, z, *args, **kwargs):
         return self.log_psi(z, *args, **kwargs) - xp.log1p(z) + self.log_dV_dz(z)
 
+
 class PL_rate(BaseRate):
-    
     @staticmethod
     def psi(z, gamma):
         """
         Power-law rate model.
         """
-        return (1.0+z)**gamma
-    
+        return (1.0 + z) ** gamma
+
     @staticmethod
     def log_psi(z, gamma):
-        return gamma*xp.log1p(z)
+        return gamma * xp.log1p(z)
+
 
 class MD_rate(BaseRate):
-    
     @staticmethod
     def psi(z, gamma, kappa, zp):
         """
         Madau-Dickinson rate model. See e.g.
         https://arxiv.org/abs/2003.12152 Eq. (2).
         """
-        C = 1 + (1 + zp)**(-(gamma + kappa))
-        return C * (1.+ z)**gamma / (1.+ ((1.+ z) / (1.+ zp))**(gamma + kappa))
+        C = 1 + (1 + zp) ** (-(gamma + kappa))
+        return C * (1.0 + z) ** gamma / (1.0 + ((1.0 + z) / (1.0 + zp)) ** (gamma + kappa))
 
     @staticmethod
     def log_psi_MD(z, gamma, kappa, zp):
-        logC = xp.log1p(xp.power(1+zp, -(gamma+kappa)))
-        return gamma*xp.log1p(z) - xp.log1p( ((1.+z)/(1.+zp))**(gamma+kappa) ) + logC
+        logC = xp.log1p(xp.power(1 + zp, -(gamma + kappa)))
+        return gamma * xp.log1p(z) - xp.log1p(((1.0 + z) / (1.0 + zp)) ** (gamma + kappa)) + logC

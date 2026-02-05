@@ -6,3 +6,4 @@ scripts/test*
 scripts/ref*
 submit/
 __pycache__/
+*.toml

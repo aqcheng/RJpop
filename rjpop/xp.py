@@ -15,3 +15,6 @@ except (ModuleNotFoundError, ImportError) as e:
     from scipy import special
     
     use_cupy = False
+
+EPS = float( xp.finfo(xp.float64).eps * 2 )
+INF = float( xp.sqrt(xp.finfo(xp.float64).max) / 10 )
