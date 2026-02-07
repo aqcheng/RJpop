@@ -1000,9 +1000,15 @@ class gaussian_copula_mass_model(MassModel):
 class sym_gaussian_copula_mass_model(MassModel):
     r"""
     Gaussian copula mass model, but assumes that all masses are drawn from the same
-    distribution X ~ p(m) with some pairing function (copula). From here we derive
-    the expressions for the distrbituions of :math:`m_1 = \max(X_1, X_2)` and
+    distribution X ~ f(m) with some pairing function (copula). From here we derive
+    the expressions for the distributions of :math:`m_1 = \max(X_1, X_2)` and
     :math:`m_2 = \min(X_1, X_2)`.
+
+    It can be shown that
+
+    .. math::
+        p(m_1 \mid \rho) &= 2 f(m_1) \Phi\left(\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_1))\right) \\
+        p(m_2 \mid \rho) &= 2 f(m_2) \Phi\left(-\sqrt{\frac{1-\rho}{1+\rho}}\,\Phi^{-1}(F(m_2))\right)
 
     In these functions `mass_1_source_model` and `mass_1_source_kwargs` refers to the
     model and kwargs of the shared mass model X.
@@ -1018,7 +1024,7 @@ class sym_gaussian_copula_mass_model(MassModel):
         Evaluates the joint density
 
         .. math::
-            p(m_2, m_1) = 2 f(m_2) f(m_1) c_\rho(F(m_2), F(m_1)) \qquad m_2 < m_1,
+            p(m_1, m_2 \mid \rho) = 2 p(m_1) p(m_2) c_\rho(F(m_1), F(m_2)) \qquad m_2 < m_1,
 
         where :math:`c_\rho(u,v)` is the Gaussian copula density.
         """
@@ -1031,8 +1037,8 @@ class sym_gaussian_copula_mass_model(MassModel):
         jacobian = m1  # P(m1, m2) -> P(m1, q)
 
         res = (
-            self.m_model.pdf(m1, **mass_1_source_kwargs)
-            * self.m_model.pdf(m2, **mass_1_source_kwargs)
+            self._p_m1(m1, rho, mass_1_source_kwargs)
+            * self._p_m2(m2, rho, mass_1_source_kwargs)
             * gaussian_copula(u, v, rho)
             * 2
             * jacobian

@@ -1,7 +1,8 @@
+import sys
+
 import h5py
 import numpy as np
 
-import sys
 sys.path.append('/work/aqc/lib/effective-spin-priors')
 from priors import chi_effective_prior_from_isotropic_spins
 

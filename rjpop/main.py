@@ -14,6 +14,7 @@ import matplotlib as mpl
 import seaborn as sns
 from corner import corner
 from eryn.backends import HDFBackend
+from eryn.ensemble import EnsembleSampler
 from eryn.moves import (
     DistributionGenerateRJ,
     GaussianMove,
@@ -68,7 +69,8 @@ parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds
 # fmt: on
 
 args = parser.parse_args()
-print(args.__dict__)
+# print settings
+print(json.dumps(args.__dict__, indent=2))
 
 data.RNG_SEED = args.seed
 xp.random.seed(args.seed)
@@ -278,8 +280,6 @@ if not args.test:
         json.dump(data.hp_ordering, f, indent=4, default=lambda x: str(x.__class__))
     with open(os.path.join(outdir, "nleaves_min_max.json"), "w") as f:
         json.dump([data.nleaves_min_dict, data.nleaves_max_dict], f, indent=4)
-    # print settings
-    print(json.dumps(args.__dict__, indent=2))
     # save settings
     with open(os.path.join(outdir, "settings.json"), "w") as f:
         json.dump(args.__dict__, f, indent=4)
@@ -348,7 +348,7 @@ if os.path.exists(backend_path):
         os.remove(backend_path)  # faulty backend / it hasn't been run
 
 if os.path.exists(backend_path):
-    print(f"Initializing from previous run at {backend_path}")
+    print(f"Initializing from previous run at {backend_path} with iter={backend.iteration}")
 else:
     # Initialize parameter chains (walker positions)
     # coords is a dict keyed by branch name each of shape:
@@ -500,21 +500,22 @@ for branch_name in rj_branches:
     if args.test:
         print(branch_name, gibbs_rate_arr)
 
-    if args.rj_num_try > 1:  # use multiple try MCMC
-        rj_move = MTDistGenMoveRJ(
-            priors,
-            num_try=args.rj_num_try,
-            nleaves_min=data.nleaves_min_dict,
-            nleaves_max=data.nleaves_max_dict,
-            gibbs_sampling_setup=branch_name,  # change one branch at a time
-        )
-    else:
-        rj_move = DistributionGenerateRJ(
-            priors,
-            nleaves_min=data.nleaves_min_dict,
-            nleaves_max=data.nleaves_max_dict,
-            gibbs_sampling_setup=branch_name,  # change one branch at a time
-        )
+    if branch_name in rj_branches:
+        if args.rj_num_try > 1:  # use multiple try MCMC
+            rj_move = MTDistGenMoveRJ(
+                priors,
+                num_try=args.rj_num_try,
+                nleaves_min=data.nleaves_min_dict,
+                nleaves_max=data.nleaves_max_dict,
+                gibbs_sampling_setup=branch_name,  # change one branch at a time
+            )
+        else:
+            rj_move = DistributionGenerateRJ(
+                priors,
+                nleaves_min=data.nleaves_min_dict,
+                nleaves_max=data.nleaves_max_dict,
+                gibbs_sampling_setup=branch_name,  # change one branch at a time
+            )
 
     rj_moves.append((rj_move, 1.0))
 
@@ -539,7 +540,7 @@ else:
     if args.test:
         backend = None
 
-ensembler_kwargs = dict(
+ensemble_kwargs = dict(
     nwalkers=args.nwalkers,
     ndims=data.branch_dims,
     log_like_fn=data.loglike,
@@ -557,11 +558,12 @@ ensembler_kwargs = dict(
     rj_moves=rj_moves,
     fill_zero_leaves_val=-INF,
     backend=backend,
+    track_moves=False # we just need overall acceptance fraction, complicated with KDE update
 )
 
 if nsteps + burn:
     # this wrapper is just to handle errors in case of incompatible existing backend
-    ensemble = utils.EnsembleSamplerWrapper(**ensembler_kwargs)
+    ensemble = EnsembleSampler(**ensemble_kwargs)
     if args.kde_update > 0 and rj_moves:
         kde_update_fn = UpdateKDEMove(log=logpath)
         # we need to store chain during burn in, so reset backend manually
@@ -569,12 +571,14 @@ if nsteps + burn:
             print(f"\nBurning in manually for {burn} steps...")
             state = ensemble.run_mcmc(state, nsteps=burn, progress=True)
             kde_update_fn(burn, state, ensemble)  # final update of kde rj moves
+
+            rj_move_name = ensemble.rj_moves[0].__class__.__name__
+            tot_rj_leaves = sum([data.nleaves_max_dict[bn] for bn in rj_branches])
             ensemble.reset(
                 nleaves_max=data.nleaves_max_dict,
                 ntemps=args.ntemps,
                 branch_names=data.branch_names,
                 rj=True,
-                moves=list(ensemble.all_moves.keys()),
                 key_order=ensemble.key_order,
             )  # reset backend
             print("...done.")

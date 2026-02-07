@@ -325,4 +325,8 @@ class UpdateKDEMove(Update):
             sampler.all_moves[f"{move.__class__.__name__}_{i}"] = move
         sampler.move_keys = list(sampler.all_moves.keys())
 
+        # note that we don't update the `move_info` stored in the backend, so that index
+        # labels across updates will have shared acceptance fractions. The true acceptance
+        # fractions per updated KDE move will be stored in the move itself (and printed to log)
+
         return list(zip(rj_moves, rj_weights, strict=True))

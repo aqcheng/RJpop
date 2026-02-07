@@ -1,4 +1,3 @@
-
 # python -u process_GWTC_PE.py --in_path /work/yifanwang/birefringence/lvksamples /work/aqc/data/GWTC_data/GWTC3 /work/aqc/data/GWTC_data/GWTC2.1 --out_path /work/aqc/data/GWTC_data/processed --target_nsamp 9000
 
 # -------------------------
@@ -163,7 +162,7 @@ GW231231_154016
 GW240104_164932
 GW240107_013215
 GW240109_050431
-""".split() # exclude NSBHs GW230518_125908 and GW230529_181500
+""".split()  # exclude NSBHs GW230518_125908 and GW230529_181500
 
 # GWTC3_BBHs = """
 # GW150914_095045
@@ -177,36 +176,65 @@ GW240109_050431
 # GW240107_013215
 # """.split()
 
-default_params = ['mass_1_source', 'mass_2_source', 'mass_ratio', 'chirp_mass_source', 'redshift', 'chi_eff']
+default_params = [
+    "mass_1_source",
+    "mass_2_source",
+    "mass_ratio",
+    "chirp_mass_source",
+    "redshift",
+    "chi_eff",
+]
 
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     import argparse
+    import json
     import os
     import re
+    import sys
+
     import h5py
     import numpy as np
-    import json
 
-    import sys
-    sys.path.append('/work/aqc/lib/effective-spin-priors')
+    sys.path.append("/work/aqc/lib/effective-spin-priors")
+    from astropy.cosmology import Planck15
     from priors import chi_effective_prior_from_isotropic_spins
 
-    from astropy.cosmology import Planck15
-
     parser = argparse.ArgumentParser()
-    parser.add_argument('-params', '--params', type=str, nargs='+', default=default_params,
-                        help='Parameters to get samples for.')
-    parser.add_argument('-in_path', '--in_path', type=str, nargs='+',
-                        help='Path(s) to directories with LVK PE samples')
-    parser.add_argument('-out_path', '--out_path', type=str, default=None,
-                        help='Output directory')
-    parser.add_argument('-catalogs', '--catalogs', type=str, nargs='+', choices=['GWTC2p1', 'GWTC3', 'GWTC4'],
-                        default=['GWTC2p1', 'GWTC3', 'GWTC4'], help='Catalogs to use')
-    parser.add_argument('-target_nsamp', '--target_nsamp', type=int, default=9000,
-                        help='Target number of PE samples to save')
-    parser.add_argument('--save_prior', action='store_true', default=False,
-                        help='Save the prior dictionary')
+    parser.add_argument(
+        "-params",
+        "--params",
+        type=str,
+        nargs="+",
+        default=default_params,
+        help="Parameters to get samples for.",
+    )
+    parser.add_argument(
+        "-in_path",
+        "--in_path",
+        type=str,
+        nargs="+",
+        help="Path(s) to directories with LVK PE samples",
+    )
+    parser.add_argument("-out_path", "--out_path", type=str, default=None, help="Output directory")
+    parser.add_argument(
+        "-catalogs",
+        "--catalogs",
+        type=str,
+        nargs="+",
+        choices=["GWTC2p1", "GWTC3", "GWTC4"],
+        default=["GWTC2p1", "GWTC3", "GWTC4"],
+        help="Catalogs to use",
+    )
+    parser.add_argument(
+        "-target_nsamp",
+        "--target_nsamp",
+        type=int,
+        default=9000,
+        help="Target number of PE samples to save",
+    )
+    parser.add_argument(
+        "--save_prior", action="store_true", default=False, help="Save the prior dictionary"
+    )
     args = parser.parse_args()
 
     priors, PE_samples = {param: [] for param in args.params}, {param: [] for param in args.params}
@@ -215,65 +243,75 @@ if __name__ == '__main__':
 
     wf_per_event = []
     for catname in sorted(args.catalogs):
-        print(f'Processing catalog {catname}')
-        if catname == 'GWTC4':
+        print(f"Processing catalog {catname}")
+        if catname == "GWTC4":
             eventnames = GWTC4_BBHs
-            fn_suffix = '.hdf5'
+            fn_suffix = ".hdf5"
         else:
             eventnames = GWTC3_BBHs
-            fn_suffix = '_cosmo.h5' # get uniform in comoving volume
-        
-        if args.save_prior: 
+            fn_suffix = "_cosmo.h5"  # get uniform in comoving volume
+
+        if args.save_prior:
             prior_saved = False
         else:
             prior_saved = True
-        
+
         for path in args.in_path:
             # look for files corresponding to the catalog
             for fn in sorted(os.listdir(path)):
-                if fn.startswith(f'IGWN-{catname}') and 'PEDataRelease' in fn and \
-                   fn.endswith(fn_suffix):
-
-                    event_name = 'GW' + '_'.join(re.split('[_-]+', fn.split('-GW')[2])[:2])
+                if (
+                    fn.startswith(f"IGWN-{catname}")
+                    and "PEDataRelease" in fn
+                    and fn.endswith(fn_suffix)
+                ):
+                    event_name = "GW" + "_".join(re.split("[_-]+", fn.split("-GW")[2])[:2])
                     if event_name in eventnames:
-                        print(f'    {event_name}')
-                        with h5py.File(os.path.join(path, fn), 'r') as f:
-
-                            if catname == 'GWTC4':
-                                if any('NRSur' in k for k in f.keys()):
-                                    key = [k for k in f.keys() if 'NRSur' in k][0]
+                        print(f"    {event_name}")
+                        with h5py.File(os.path.join(path, fn), "r") as f:
+                            if catname == "GWTC4":
+                                if any("NRSur" in k for k in f.keys()):
+                                    key = [k for k in f.keys() if "NRSur" in k][0]
                                 else:
-                                    key = [k for k in f.keys() if 'Mixed' in k][0]
+                                    key = [k for k in f.keys() if "Mixed" in k][0]
                             else:
-                                key = [k for k in f.keys() if 'IMRPhenom' in k][0]
-                            wf_per_event.append([event_name, key.split(':')[-1]])
-                            
-                            nsamps_tot = f[key]['posterior_samples'].size
+                                key = [k for k in f.keys() if "IMRPhenom" in k][0]
+                            wf_per_event.append([event_name, key.split(":")[-1]])
+
+                            nsamps_tot = f[key]["posterior_samples"].size
                             if nsamps_tot > args.target_nsamp:
-                                inds = np.sort(np.random.choice(nsamps_tot, args.target_nsamp, replace=False))
+                                inds = np.sort(
+                                    np.random.choice(nsamps_tot, args.target_nsamp, replace=False)
+                                )
                             else:
                                 inds = np.arange(nsamps_tot)
 
                             for param in args.params:
-                                PE_samples[param].append(f[key]['posterior_samples'][inds, param])
+                                PE_samples[param].append(f[key]["posterior_samples"][inds, param])
 
                             if not prior_saved:
-                                phenom_key = [k for k in f.keys() if 'IMRPhenom' in k][0]
-                                try: # save a prior dictionary
-                                    priordict = {key : f[phenom_key]['priors']['analytic'][key][0].decode('utf8') for key in f[phenom_key]['priors']['analytic']}
+                                phenom_key = [k for k in f.keys() if "IMRPhenom" in k][0]
+                                try:  # save a prior dictionary
+                                    priordict = {
+                                        key: f[phenom_key]["priors"]["analytic"][key][0].decode(
+                                            "utf8"
+                                        )
+                                        for key in f[phenom_key]["priors"]["analytic"]
+                                    }
                                     if priordict:
-                                        prior_fn = os.path.join(args.out_path, f'{catname}_prior.json')
-                                        with open(prior_fn, 'w') as pf:
+                                        prior_fn = os.path.join(
+                                            args.out_path, f"{catname}_prior.json"
+                                        )
+                                        with open(prior_fn, "w") as pf:
                                             json.dump(priordict, pf)
                                         prior_saved = True
-                                        print(f'    {catname} prior saved from event {event_name}')
-                                except Exception as e:
+                                        print(f"    {catname} prior saved from event {event_name}")
+                                except Exception:
                                     pass
 
     # stack samples
-    # get minimum n samples 
+    # get minimum n samples
     nsamps = min([len(i) for i in PE_samples[args.params[0]]])
-    print(f'Using {nsamps} samples for each event (target: {args.target_nsamp})')
+    print(f"Using {nsamps} samples for each event (target: {args.target_nsamp})")
 
     # downsample each event
     for event_idx in range(len(PE_samples[args.params[0]])):
@@ -283,26 +321,26 @@ if __name__ == '__main__':
 
     for param in args.params:
         PE_samples[param] = np.vstack(PE_samples[param])
-    
+
     # compute prior
     # default prior: uniform in det-frame masses, uniform in comoving volume, isotropic spins
     # want p(m1, q, chieff, z)
 
-    z = PE_samples['redshift']
-    m1 = PE_samples['mass_1_source']
-    q = PE_samples['mass_ratio']
-    chi_eff = PE_samples['chi_eff']
+    z = PE_samples["redshift"]
+    m1 = PE_samples["mass_1_source"]
+    q = PE_samples["mass_ratio"]
+    chi_eff = PE_samples["chi_eff"]
 
-    prior = (1+z)**2 * Planck15.differential_comoving_volume(z).value / 1e9 #p(m1,m2,z)
-    prior *= m1 # p(m1,m2) -> p(m1, q)
+    prior = (1 + z) ** 2 * Planck15.differential_comoving_volume(z).value / 1e9  # p(m1,m2,z)
+    prior *= m1  # p(m1,m2) -> p(m1, q)
 
     prior *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=0.99)
 
-    PE_samples['prior'] = prior
+    PE_samples["prior"] = prior
 
-    # save 
-    prefix = 'GWTC' + '_'.join([catname.split('GWTC')[-1] for catname in args.catalogs])
-    np.savez(os.path.join(args.out_path, prefix+'_PE_samples.npz'), **PE_samples)
+    # save
+    prefix = "GWTC" + "_".join([catname.split("GWTC")[-1] for catname in args.catalogs])
+    np.savez(os.path.join(args.out_path, prefix + "_PE_samples.npz"), **PE_samples)
 
     # save table of event names, keys
-    np.savetxt(os.path.join(args.out_path, prefix+'_waveforms.txt'), wf_per_event, fmt='%s')
+    np.savetxt(os.path.join(args.out_path, prefix + "_waveforms.txt"), wf_per_event, fmt="%s")
