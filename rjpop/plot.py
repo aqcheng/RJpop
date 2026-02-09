@@ -159,12 +159,12 @@ def plot_2D_contours_and_marginals(
     ref_y = np.nanpercentile(y_marg_ppd, 99)
     if x_param_ylog:
         ax_x.set_yscale("log")
-        ax_x.set_ylim(1e-4 * ref_x, 3 * ref_x)
+        ax_x.set_ylim(1e-5 * ref_x, 3 * ref_x)
     else:
         ax_x.set_ylim(0, ref_x)
     if y_param_ylog:
         ax_y.set_xscale("log")
-        ax_y.set_xlim(1e-4 * ref_y, 3 * ref_y)
+        ax_y.set_xlim(1e-5 * ref_y, 3 * ref_y)
     else:
         ax_y.set_xlim(0, ref_y)
     ax_x.set_ylim(x_param_ylim)

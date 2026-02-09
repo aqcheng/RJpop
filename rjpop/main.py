@@ -6,7 +6,7 @@ from glob import glob
 
 import data
 import numpy as np
-from xp import use_cupy, xp
+from xp import xp
 
 sys.path.append("/work/aqc/lib/Eryn/src")
 # packages for post-processing
@@ -61,6 +61,8 @@ parser.add_argument('--outdir', '-outdir', type=str, help='Output directory')
 # Hyperparameters
 parser.add_argument('--use_mchirp', action='store_true', help='Use chirp mass instead of m1 - not currently implemented')
 parser.add_argument('--min_sep', '--minsep', type=float, default=3.0, help='Enforce a minimum separation in feature space between components. Default: 3')
+parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), help="The minimum and maximum rate for the rate prior of each component. Default: (0.05, 100)")
+parser.add_argument('--lograte', action='store_true', help="Use a log-in-uniform rate prior")
 
 # plotting options
 parser.add_argument('--mmax_plot', type=float, default=100, help='Maximum mass to plot for mass_1_source and mass_2_source')
@@ -249,9 +251,10 @@ for branch_idx, input_dict in enumerate(input_priordicts):
 
     if branch_name != "global":
         #  add R0 for each local branch
-        branch_priordicts[branch_idx][hp_idx] = uniform_dist(
-            0.05, 100
-        )  # rate prior, in 1 / (Gpc^3 yr)
+        if args.lograte:
+            branch_priordicts[branch_idx][hp_idx] = log_uniform(*args.rate_prior)
+        else:
+            branch_priordicts[branch_idx][hp_idx] = uniform_dist(*args.rate_prior)
         data.hp_ordering[branch_idx]["__latex__"].append("$R_0$")
         hp_idx += 1
 
@@ -268,7 +271,7 @@ for branch_idx, input_dict in enumerate(input_priordicts):
 
     # each local branch will have the number of parameters specified in the prior file + 1 (R0)
 
-    priors[branch_name] = ProbDistContainer(branch_priordicts[branch_idx], use_cupy=use_cupy)
+    priors[branch_name] = ProbDistContainer(branch_priordicts[branch_idx])
     data.branch_dims.append(hp_idx)
 
     assert covs_all[-1].size <= 1 or covs_all[-1].size == hp_idx, (
@@ -1431,6 +1434,9 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
             if param_name == "mass_1_source" or param_name == "mass_2_source":
                 ax_comp.set_xlim(right=args.mmax_plot)
                 ax_tot.set_xlim(right=args.mmax_plot)
+                if args.mmax_plot > 100:
+                    ax_comp.set_ylim(bottom=1e-5)
+                    ax_tot.set_ylim(bottom=1e-5)
 
             draw_ctx = model_draw_ctxs[sig]
 
@@ -1455,8 +1461,11 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
 
                 # each ppd is (nsamples, ngrid)
                 for label_idx, ppd in enumerate(branch_rate_ppd_by_label):
-                    comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
-                    legend_label = plot.textsc_ify(comp_label)
+                    if len(data.branch_names) > 2: # legend not needed if only 1 local branch
+                        comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
+                        legend_label = plot.textsc_ify(comp_label)
+                    else:
+                        legend_label = None
                     color = palette[label_idx] if use_labels else color_tot
 
                     plot.plot_ppds(ax_comp, x, ppd, CI=None, color=color, label=legend_label)
