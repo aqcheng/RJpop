@@ -63,6 +63,7 @@ parser.add_argument('--use_mchirp', action='store_true', help='Use chirp mass in
 parser.add_argument('--min_sep', '--minsep', type=float, default=3.0, help='Enforce a minimum separation in feature space between components. Default: 3')
 
 # plotting options
+parser.add_argument('--mmax_plot', type=float, default=100, help='Maximum mass to plot for mass_1_source and mass_2_source')
 parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
@@ -558,7 +559,7 @@ ensemble_kwargs = dict(
     rj_moves=rj_moves,
     fill_zero_leaves_val=-INF,
     backend=backend,
-    track_moves=False # we just need overall acceptance fraction, complicated with KDE update
+    track_moves=False,  # we just need overall acceptance fraction, complicated with KDE update
 )
 
 if nsteps + burn:
@@ -635,7 +636,6 @@ if nsteps + burn:
             converged = True
 
         # print diagnostics
-        
 
         del ensemble
 else:
@@ -653,9 +653,7 @@ if backend.rj:
         logpath, f"Total RJ acceptance fraction: {rj_acc_frac:.2g} +/- {rj_acc_frac_std:.2g}"
     )
 if args.ntemps > 1:
-    utils.print_to(
-        logpath, f"Swap acceptance fraction: {utils.swap_acceptance_fraction(backend)}"
-    )
+    utils.print_to(logpath, f"Swap acceptance fraction: {utils.swap_acceptance_fraction(backend)}")
 
 # plot log posterior
 
@@ -683,14 +681,15 @@ utils.print_to(logpath, f"Using thin {thin} and discard {discard} ({nsamples} sa
 
 def save_or_not(path):  # determine if it needs to be replotted
     if "/" not in path:
-        if path.endswith((".png", ".pdf")):
+        if path.endswith(("png", "pdf")):
             path = os.path.join(figpath, path)
-        elif path.endswith((".npy", ".npz")):
+        elif path.endswith(("npy", "npz")):
             path = os.path.join(datapath, path)
     if "*" in path:
         matches = glob(path)
-        return len(matches) == 0 or args.replot
-    res = (not os.path.exists(path)) or args.replot
+        res = len(matches) == 0 or args.replot
+    else:
+        res = (not os.path.exists(path)) or args.replot
     if not res:
         print(f"Skipping {path}")
     return res
@@ -821,6 +820,7 @@ if rj_branches:
     sigs_all, inv, counts = np.unique(
         model_counts, axis=0, return_inverse=True, return_counts=True
     )
+    sigs_all = [tuple([int(i) for i in sig]) for sig in sigs_all]
     # sigs are the unique model 'signatures', i.e. tuples with the # of components of each rj branch
 
     sig_names_all = [
@@ -849,7 +849,6 @@ if rj_branches:
             sig_names.append(sig_names_all[t])
             bayes_factors.append(float(bf))
 
-    nmodels_plot = len(model_inds)
     rj_labelled_comps = np.amax(np.stack(sigs, axis=0), axis=0)
     for rj_branch, ncomps in zip(rj_branches, rj_labelled_comps, strict=True):
         n_labelled_comps[data.branch_names.index(rj_branch)] = ncomps
@@ -857,7 +856,6 @@ if rj_branches:
 
     best_model_idx = np.argmax(bayes_factors)
 else:
-    nmodels_plot = 0
     n_labelled_comps = np.array(
         [data.nleaves_max_dict[bn] for bn in data.branch_names], dtype=np.int32
     )
@@ -1012,6 +1010,60 @@ for branch_name in data.branch_names[:-1]:
     start_idx += ncomps
 # these are lists - careful that we plot things in the same order as we assign names
 
+# define and count submodels
+tot_n_labelled_comps = len(comp_label_sigs)
+submodel_counts = np.zeros((nsamples, tot_n_labelled_comps), dtype=np.int32)
+for col_idx, (rj_bn, comp_idx) in enumerate(comp_label_sigs):
+    submodel_counts[:, col_idx] += (labels_dict[rj_bn] == comp_idx).sum(axis=1)
+submodel_sigs_all, inv, counts_ = np.unique(
+    submodel_counts, axis=0, return_inverse=True, return_counts=True
+)
+submodel_sig_names_all, submodel_model_signames_all = [], []
+for sig in submodel_sigs_all:
+    submodel_sig_names_all.append(
+        ", ".join(
+            [
+                comp_name
+                for comp_name, sig_count in zip(comp_labels, sig, strict=True)
+                for _ in range(sig_count)
+            ]
+        )
+    )
+    submodel_model_sig = []
+    col_idx_start = 0
+    for rj_bn in rj_branches:
+        col_idx_end = col_idx_start + n_labelled_comps[data.branch_names.index(rj_bn)]
+        submodel_model_sig.append(int(sum(sig[col_idx_start:col_idx_end])))
+        col_idx_start = col_idx_end
+    submodel_model_sig_name = sig_names_all[sigs_all.index(tuple(submodel_model_sig))]
+    submodel_model_signames_all.append(submodel_model_sig_name)
+
+submodel_model_signames_all = {
+    name: model_sig
+    for name, model_sig in zip(submodel_sig_names_all, submodel_model_signames_all, strict=True)
+}
+# dictionary that maps submodel name -> which model it belongs to (e.g. 'PL A, gauss B' -> (1 PL, 1 gauss))
+
+# submodel signatures are a tuple of counts corresponding to each component in comp_label_sigs
+# same as above - relative evidences
+submodel_bf_all = counts_ / np.amax(counts) # use same relative factor as above
+utils.print_to(logpath, "\n\nSUBMODEL BAYES FACTORS (relative to preferred model):")
+pad = max([len(str(list(s))) for s in submodel_sig_names_all]) + 1
+for sig_name, bf in zip(submodel_sig_names_all, submodel_bf_all, strict=True):
+    utils.print_to(logpath, f"{sig_name:<{pad}}: {bf:.5f}")
+
+submodel_names, submodel_sigs = [], []
+submodel_inds, submodel_bfs = [], []
+for t, bf in enumerate(submodel_bf_all):
+    if bf > bf_threshold:  # ignore insignificant models:
+        idx = np.nonzero(inv == t)[0]
+        submodel_inds.append(idx.copy())
+        submodel_sigs.append(submodel_sigs_all[t])
+        submodel_names.append(submodel_sig_names_all[t])
+        submodel_bfs.append(float(bf))
+submodel_names.append(0)  # for all non-rj parameters
+submodel_inds.append(np.arange(nsamples))
+
 # get R02s aggregated by label
 R02s_by_label = []
 for bn in data.branch_names[:-1]:
@@ -1146,7 +1198,7 @@ if not args.skip_corner:  # skip for debugging
     for comp_label, comp_label_sig in zip(
         nonsmall_comp_labels, nonsmall_comp_label_sigs, strict=True
     ):
-        if save_or_not(f"corner_{comp_label}*.pdf"):
+        if save_or_not(f"corner_{comp_label}*pdf"):
             bn, comp_idx = comp_label_sig
 
             sb = samples_dict[bn]
@@ -1168,48 +1220,56 @@ if not args.skip_corner:  # skip for debugging
 ### extract and plot PPDs
 print("\nPlotting PPDs")
 
-model_draw_ctx_fn = "model_draw_ctxs.npy"
-if save_or_not(model_draw_ctx_fn):
-    # prepare draws for each models
-    model_draw_ctxs = {}
-    for sig_name, inds in zip(sig_names, model_inds, strict=True):
-        samples_input, labels_input = [], []
-        if inds.size > ndraws:
-            sel_inds = rng.choice(inds, size=ndraws, replace=False)
-        else:
-            sel_inds = inds
-        for bn in data.branch_names:
-            samples_input.append(utils.to_numpy(samples_dict[bn][sel_inds]))
-            if bn in labels_dict:
-                labels_input.append(np.asarray(labels_dict[bn][sel_inds]))
+draw_ctxs = {}
+for model_or_submodel, sig_names_, model_inds_ in zip(
+    ("model", "submodel"),
+    (sig_names, submodel_names),
+    (model_inds, submodel_inds),
+    strict=True,
+):
+    draw_ctx_fn = f"{model_or_submodel}_draw_ctxs.npy"
+    if save_or_not(draw_ctx_fn):
+        # prepare draws for each models
+        draw_ctx = {}
+        for sig_name, inds in zip(sig_names_, model_inds_, strict=True):
+            samples_input, labels_input = [], []
+            if inds.size > ndraws:
+                sel_inds = rng.choice(inds, size=ndraws, replace=False)
             else:
-                labels_input.append(None)
-        z_02_factor_draws = utils.to_numpy(z_02_factor[sel_inds])
-        R02_tot_draws = utils.to_numpy(R02_tot[sel_inds])
-        R02_labelled_draws = utils.to_numpy(R02s_by_label[sel_inds])
+                sel_inds = inds
+            for bn in data.branch_names:
+                samples_input.append(utils.to_numpy(samples_dict[bn][sel_inds]))
+                if bn in labels_dict:
+                    labels_input.append(np.asarray(labels_dict[bn][sel_inds]))
+                else:
+                    labels_input.append(None)
+            z_02_factor_draws = utils.to_numpy(z_02_factor[sel_inds])
+            R02_tot_draws = utils.to_numpy(R02_tot[sel_inds])
+            R02_labelled_draws = utils.to_numpy(R02s_by_label[sel_inds])
 
-        model_draw_ctxs[sig_name] = {
-            "sel_inds": sel_inds,
-            "samples_input": samples_input,
-            "labels_input": labels_input,
-            "z_02_factor_draws": z_02_factor_draws,
-            "R02_labelled_draws": R02_labelled_draws,
-            "R02_tot_draws": R02_tot_draws,
-        }
-    # save
-    np.save(os.path.join(datapath, model_draw_ctx_fn), model_draw_ctxs, allow_pickle=True)
-    print(f"Saved {model_draw_ctx_fn}")
-else:
-    print(f"Loading {model_draw_ctx_fn}")
-    model_draw_ctxs = np.load(
-        os.path.join(datapath, "model_draw_ctxs.npy"), allow_pickle=True
-    ).item()
+            draw_ctx[sig_name] = {
+                "sel_inds": sel_inds,
+                "samples_input": samples_input,
+                "labels_input": labels_input,
+                "z_02_factor_draws": z_02_factor_draws,
+                "R02_labelled_draws": R02_labelled_draws,
+                "R02_tot_draws": R02_tot_draws,
+            }
+        # save
+        np.save(os.path.join(datapath, draw_ctx_fn), draw_ctx, allow_pickle=True)
+        print(f"Saved {draw_ctx_fn}")
+        draw_ctxs[model_or_submodel] = draw_ctx
+    else:
+        print(f"Loading {draw_ctx_fn}")
+        draw_ctxs[model_or_submodel] = np.load(
+            os.path.join(datapath, draw_ctx_fn), allow_pickle=True
+        ).item()
 
 # construct grid for evaluating data
 ngrid = 101
 data_grid = {
-    "mass_1_source": np.linspace(2, 100, 5 * ngrid),
-    "mass_2_source": np.linspace(2, 100, 5 * ngrid),
+    "mass_1_source": np.linspace(2, args.mmax_plot, 5 * ngrid),
+    "mass_2_source": np.linspace(2, args.mmax_plot, 5 * ngrid),
     "mass_ratio": np.linspace(0, 1, ngrid),
     "chi_eff": np.linspace(-1, 1, ngrid),
     "redshift": np.linspace(0, 1.5, ngrid),
@@ -1305,16 +1365,41 @@ else:
     res, spin_res = None, None
 
 
-def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
+def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, model_sig_name=None):
     """
     Plot PPDs using one subplot per RJ model (top-N by posterior frequency).
 
     Components are grouped by (branch_name, label_id). For each model subplot, we
     evaluate PPDs on a random subsample of posterior draws belonging to that RJ
-    model signature, and plot credible intervals for each component plus a total.
+    model signature, and plot ppd draws as well as the 90 CI for the total ppd.
 
-    CI=None plots individual ppds rather than a credible interval.
+    If `model_sig_name` is specified, then it plots submodels of the model sig.
     """
+
+    # get right draw ctx
+    if model_sig_name is None:
+        model_draw_ctxs = draw_ctxs["model"]
+        bfs = bayes_factors
+    else:
+        assert model_sig_name in sig_names_all, (
+            f"Invalid model signature {model_sig_name}. Valid signatures: {sig_names_all}"
+        )
+        model_draw_ctxs = {
+            k: v
+            for k, v in draw_ctxs["submodel"].items()
+            if submodel_model_signames_all.get(k) == model_sig_name
+        }
+        bfs = [submodel_bfs[submodel_names.index(name)] for name in model_draw_ctxs.keys()]
+        model_draw_ctxs[0] = draw_ctxs["submodel"][0]
+
+    # sort by bf
+    sig_names = list(model_draw_ctxs.keys())
+    bfs.append(-1)  # put combined model last; sig_names already includes sig_names[-1] = 0
+    bfs, sig_names = utils.sort_lists(bfs, sig_names, strict=False, reverse=True)
+
+    nplot = min(len(sig_names), 5)  # at most 5 panels
+    bfs = bfs[:nplot]
+    sig_names = sig_names[:nplot]
 
     param_name_check = "mass" if param_name.startswith("mass") else param_name
     # assumes joint mass model -- currently hard coded in
@@ -1325,14 +1410,14 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
         # local parameter
 
         if param_name == "mass_1_source" or param_name == "mass_2_source":
-            figsize = (16, 4 * (nmodels_plot + 1))
+            figsize = (16, 4 * nplot)
             fontsize = 20
         else:
-            figsize = (12, 4 * (nmodels_plot + 1))
+            figsize = (12, 4 * nplot)
             fontsize = 17
 
-        fig, axes = plt.subplots(nmodels_plot + 1, 2, figsize=figsize, sharex=True, sharey=True)
-        if nmodels_plot == 0:
+        fig, axes = plt.subplots(nplot, 2, figsize=figsize, sharex=True, sharey=True)
+        if nplot == 1:
             axes = [axes]
         # last row will be combined between all models
 
@@ -1341,8 +1426,11 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
             ax_comp, ax_tot = row_axes
 
             # plot GWTC-4 on all plots
-            plot.setup_and_plot_GWTC4(param_name, ax_comp, res=res, spin_res=spin_res)
+            plot.setup_and_plot_GWTC4(param_name, ax_comp, res=res, spin_res=spin_res, label=None)
             plot.setup_and_plot_GWTC4(param_name, ax_tot, res=res, spin_res=spin_res)
+            if param_name == "mass_1_source" or param_name == "mass_2_source":
+                ax_comp.set_xlim(right=args.mmax_plot)
+                ax_tot.set_xlim(right=args.mmax_plot)
 
             draw_ctx = model_draw_ctxs[sig]
 
@@ -1367,9 +1455,8 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
 
                 # each ppd is (nsamples, ngrid)
                 for label_idx, ppd in enumerate(branch_rate_ppd_by_label):
-                    legend_label = (
-                        branch_name if (label_idx == 0 and len(data.branch_names) > 2) else None
-                    )
+                    comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
+                    legend_label = plot.textsc_ify(comp_label)
                     color = palette[label_idx] if use_labels else color_tot
 
                     plot.plot_ppds(ax_comp, x, ppd, CI=None, color=color, label=legend_label)
@@ -1385,20 +1472,17 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
 
             # formatting
             ax_tot.set_ylabel(None)
-            if model_idx < nmodels_plot:
+            if model_idx < nplot - 1:
                 ax_comp.set_xlabel(None)
                 ax_tot.set_xlabel(None)
 
             # label each row with model name and bayes factor (if RJ)
+            plt_label = None
             if sig:
-                bf = (
-                    f"{bayes_factors[model_idx]:.2f}"
-                    if bayes_factors[model_idx] > 0.01
-                    else f"{bayes_factors[model_idx]:.2e}"
-                )
+                bf = f"{bfs[model_idx]:.2f}" if bfs[model_idx] > 0.01 else f"{bfs[model_idx]:.2e}"
                 plt_label = plot.textsc_ify(f"{sig} ($\\mathcal{{B}}={bf}$)")
             elif rj_branches:  # no label needed unless RJ
-                plt_label = plot.textsc_ify("Combined")
+                plt_label = plot.textsc_ify("Combined" + ("" if model_sig_name is None else f" - {model_sig_name}"))
             ax_tot.text(
                 0.96,
                 0.95,
@@ -1425,18 +1509,22 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
 
         # legend
         all_handles, all_labels = [], []
-        for ax in axes[-1]:  # collect legend labels
+        for ax in axes[-1]:  # last row
             h, l = ax.get_legend_handles_labels()
-            for handle, label in zip(h, l, strict=True):
-                if label not in all_labels:
-                    all_handles.append(handle)
-                    all_labels.append(label)
+            l, h = utils.sort_lists(l, h)
+            for h_, l_ in zip(h, l, strict=True):
+                if l_ not in all_labels:
+                    all_handles.append(h_)
+                    all_labels.append(l_)
+        ncol = len(all_handles)
+        if ncol > 5:
+            ncol = int(np.ceil(len(all_handles) / 2))
         fig.legend(
             handles=all_handles,
             labels=all_labels,
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.98),
-            ncol=len(all_handles),
+            bbox_to_anchor=(0.5, 0.99),
+            ncol=ncol,
             fontsize=fontsize + 2,
             frameon=False,
         )
@@ -1465,7 +1553,12 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
     else:
         raise ValueError(f"Unrecognized param name {param_name}")
 
-    fn = f"{param_name}_labelled.pdf" if use_labels else f"{param_name}.pdf"
+    fn_parts = [param_name]
+    if use_labels:
+        fn_parts.append("labelled")
+    elif model_sig_name is not None:
+        fn_parts.append(utils.get_safe_fn(model_sig_name))
+    fn = f"{'_'.join(fn_parts)}.pdf"
     plt.savefig(os.path.join(figpath, fn))
     print(f"Saved {fn}")
     plt.close()
@@ -1474,9 +1567,12 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True):
     return dict_out
 
 
+best_sig_name = sig_names[best_model_idx]
 ppds_fn = "ppds.npy"
-if save_or_not(ppds_fn):
+submodel_ppds_fn = f"ppds_{utils.get_safe_fn(best_sig_name)}.npy"
+if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
     ppds_dict = {}
+    submodel_ppds_dict = {}
     if rj_branches:
         ppds_dict["rj_branches"] = np.array(rj_branches, dtype=str)
         ppds_dict["model_sigs"] = sig_names
@@ -1495,19 +1591,29 @@ if save_or_not(ppds_fn):
         "mass_ratio",
     ]:
         ppds_dict[f"{param_name}"] = plot_model_ppd(param_name, use_labels=False)
+        # don't need to plot unlabelled twice
         for b_idx, bn in enumerate(data.branch_names[:-1]):
             if data.nleaves_max_dict[bn] > 1:
                 if data.get_parent_param(b_idx, param_name) in data.hp_ordering[b_idx]:  # rj
                     ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
                         param_name, use_labels=True
                     )
+                    if bn in rj_branches:
+                        submodel_ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
+                            param_name, use_labels=True, model_sig_name=best_sig_name
+                        )
                     break
 
     np.save(os.path.join(datapath, ppds_fn), ppds_dict, allow_pickle=True)
     print(f"Saved {ppds_fn}")
+    np.save(os.path.join(datapath, submodel_ppds_fn), submodel_ppds_dict, allow_pickle=True)
+    print(f"Saved {submodel_ppds_fn}")
 else:
     print(f"Loading in ppds from {ppds_fn}")
     ppds_dict = np.load(os.path.join(datapath, ppds_fn), allow_pickle=True).item()
+
+model_draw_ctxs = draw_ctxs["model"]
+# only want to plot model (not submodels) for contours
 
 # finally, plot 2D!!
 
@@ -1641,7 +1747,7 @@ def _plot_param_2D_contours_and_marginals(
                 [],
                 [],
                 color=colors[i],
-                label=plot.textsc_ify(comp_labels[i].capitalize()),
+                label=plot.textsc_ify(comp_labels[i]),
             )
             for i in range(ncomps)
             if i not in bad_idx
@@ -1738,7 +1844,6 @@ def _plot_param_2D_contours_and_marginals(
 
 
 # plot 2d contours of best model
-best_sig_name = sig_names[best_model_idx]
 for param_x, param_y in [
     ("mass_ratio", "chi_eff"),
     ("mass_1_source", "chi_eff"),

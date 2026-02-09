@@ -30,9 +30,11 @@ def plot_ppds(
         for ppd in ppds:  # plot individual ppds
             if np.any(ppd > 0):
                 if swap_xy:
-                    ax.plot(ppd, x, color=color, alpha=0.2, lw=0.1)
+                    ax.plot(ppd, x, color=color, alpha=0.1, lw=0.1)
                 else:
-                    ax.plot(x, ppd, color=color, alpha=0.2, lw=0.1)
+                    ax.plot(x, ppd, color=color, alpha=0.1, lw=0.1)
+        if label is not None:
+            ax.plot([], [], lw=1, color=color, label=label)
 
     else:
         dist = (100 - CI) / 2
@@ -259,7 +261,7 @@ texnames = {
 
 
 def setup_and_plot_GWTC4(
-    param_name, ax, res: PopulationResult | None = None, spin_res: PopulationResult | None = None
+    param_name, ax, res: PopulationResult | None = None, spin_res: PopulationResult | None = None, label = True,
 ):
 
     x, y = None, None
@@ -268,7 +270,7 @@ def setup_and_plot_GWTC4(
         if spin_res is not None:
             x, y = spin_res.get_rates_on_grids("Effective inspiral spin")
             x, y = x[0], y.T  # bruh
-            label = "LVK skew-normal"
+            label_default = "LVK skew-normal"
         ax.grid(color="silver", alpha=0.5, ls=":", zorder=0)
         ax.set_xlabel(r"$\chi_\mathrm{eff}$")
         ax.set_ylabel(r"$p(\chi_\mathrm{eff})$")
@@ -280,9 +282,9 @@ def setup_and_plot_GWTC4(
         if res is not None:
             x, y = pf.get_params(res, "mass_1")
             if "BSpline" in res.fname:
-                label = r"$\textsc{LVK Spline}$"
+                label_default = r"$\textsc{LVK Spline}$"
             else:
-                label = r"$\textsc{LVK BP2P}$"
+                label_default = r"$\textsc{LVK BP2P}$"
         pf.setup_mass_plot(
             ax,
             grid_kwargs=dict(ls="dotted", color="k", alpha=0),
@@ -305,17 +307,17 @@ def setup_and_plot_GWTC4(
         if res is not None:
             if "BSpline" in res.fname:
                 x, y = pf.get_params(res, "rate_vs_mass_ratio_at_z0-2", rate=False)
-                label = r"$\textsc{LVK Spline}$"
+                label_default = r"$\textsc{LVK Spline}$"
             else:
                 x, y = pf.get_params(res, "mass_ratio")
-                label = r"$\textsc{LVK BP2P}$"
+                label_default = r"$\textsc{LVK BP2P}$"
         pf.setup_mass_ratio_plot(ax, grid_kwargs=dict(ls="dotted", color="k", alpha=0.3))
 
     elif param_name == "redshift":
         if res is not None:
             x, y = res.get_rates_on_grids("redshift")
             x = x[0]  # bro why did the LVK code it like this
-            label = "LVK"
+            label_default = "LVK"
 
         ax.set_yscale("log")
         ax.set_ylim([8, 3e3])
@@ -329,6 +331,9 @@ def setup_and_plot_GWTC4(
     else:
         print(f"Unrecognized plotting parameter {param_name}")
         return
+    
+    if not isinstance(label, str):
+        label = label_default if label else None
 
     if x is not None and y is not None:
         pf.plot_90CI(

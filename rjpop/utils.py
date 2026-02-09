@@ -159,6 +159,11 @@ def check_min_separation(X, min_sep, xp=xp):
 ### PATH / FILE / DATA STUFF
 
 
+def sort_lists(*lists, reverse=False, strict=True):
+    """Sorts multiple lists by the first list."""
+    return [list(x) for x in zip(*sorted(zip(*lists, strict=strict), reverse=reverse), strict=True)]
+
+
 def to_numpy(arr):
     """Convert CuPy->NumPy if needed; otherwise return a NumPy view/copy."""
     return arr.get() if hasattr(arr, "get") else np.asarray(arr)
@@ -346,14 +351,17 @@ def get_move_acceptance_fraction(moves, temp_index=None):
     acc_frac = sum(n_acc) / sum(n_prop)
     return np.mean(acc_frac), np.std(acc_frac)
 
+
 # These are wrappers to get diagnostics without requiring explicitly referring to a sampler.
 # Code is pretty much lifted directly from eryn.ensemble.EnsembleSampler
+
 
 def acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     frac = backend.accepted[temp_index] / float(backend.iteration)
     return np.mean(frac), np.std(frac)
+
 
 def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
@@ -363,6 +371,7 @@ def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> f
         return None
     frac = backend.rj_accepted / float(backend.iteration)
     return np.mean(frac), np.std(frac)
+
 
 def swap_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"

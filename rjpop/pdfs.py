@@ -991,9 +991,9 @@ class gaussian_copula_mass_model(MassModel):
         else:
             raise ValueError(f"Unknown parameter {param}")
 
-    def moments(self, mass_1_source_kwargs, mass_ratio_kwargs, rho):
+    def moments(self, mass_1_source_kwargs, mass_2_source_kwargs, rho):
         m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
-        m2_mu, m2_std = self.m2_model.moments(**mass_ratio_kwargs)
+        m2_mu, m2_std = self.m2_model.moments(**mass_2_source_kwargs)
         return {"mass_1_source": (m1_mu, m1_std), "mass_2_source": (m2_mu, m2_std)}
 
 

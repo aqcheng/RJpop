@@ -7,3 +7,4 @@ scripts/ref*
 submit/
 __pycache__/
 *.toml
+submit.sh
