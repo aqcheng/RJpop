@@ -130,7 +130,7 @@ PARAM_SCALES = {  # characteristic scales for each parameter
     "mass_1_source": 8.0,
     "mass_2_source": 8.0,
     "mass_ratio": 0.25,
-    "chi_eff": 0.05,
+    "chi_eff": 0.04,
 }
 RATE_FACTOR = 10.0
 
@@ -245,7 +245,7 @@ ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 def EnsembleSamplerWrapper(*args, **kwargs):
     try:
         ensemble = EnsembleSampler(*args, **kwargs)
-    except ValueError as e:
+    except Exception as e:
         print(f"Can't use existing backend: {e}")
         # start a new backend
         backend_path = kwargs["backend"].filename

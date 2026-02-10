@@ -938,12 +938,17 @@ class gaussian_copula_mass_model(MassModel):
         # m1 = F1^{-1}(Phi(z1))
         m1 = self.m1_model.ppf(special.ndtr(self._zz), **mass_1_source_kwargs)
 
-        # threshold in z2-space
-        z2_thr = special.ndtri(self.m2_model.cdf(m1, **mass_2_source_kwargs))
+        # threshold
+        m2_q = self.m2_model.cdf(m1, **mass_2_source_kwargs)
+        z2_thr = special.ndtri(m2_q)
 
         # conditional CDF
         arg = (z2_thr - rho * self._zz) / xp.sqrt(1 - rho**2)
-        integrand = gaussian._pdf(self._zz) * special.ndtr(arg)
+        integrand = gaussian._pdf(self._zz) * xp.where(
+            xp.isfinite(arg),
+            special.ndtr(arg),
+            0.0,  # outside region of integration
+        )
 
         return xp.sum(integrand) * self._dz
 
@@ -956,21 +961,20 @@ class gaussian_copula_mass_model(MassModel):
         norm = self._compute_norm(rho, mass_1_source_kwargs, mass_2_source_kwargs)
 
         jacobian = m1  # P(m1, m2) -> P(m1, q)
+        m1_pdf = self.m1_model.pdf(m1, **mass_1_source_kwargs)
+        m2_pdf = self.m2_model.pdf(m2, **mass_2_source_kwargs)
+        copula_vals = gaussian_copula(u, v, rho)
 
         res = (
-            self.m1_model.pdf(m1, **mass_1_source_kwargs)
-            * self.m2_model.pdf(m2, **mass_2_source_kwargs)
-            * gaussian_copula(u, v, rho)
+            m1_pdf
+            * m2_pdf
+            * copula_vals
             / norm
             * jacobian
             * _check_gaussian_copula_params(m1, m2, rho)
         )
 
         return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
-
-    @staticmethod
-    def _check_params(m1, m2, rho):
-        return (m1 >= m2) * (rho > -1) * (rho < 1)
 
     def _p_q(self, q, mass_1_source_kwargs, mass_2_source_kwargs, rho):
         qq, mm1 = xp.meshgrid(q, _mm, indexing="ij", copy=False)

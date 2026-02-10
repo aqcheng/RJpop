@@ -14,7 +14,6 @@ import matplotlib as mpl
 import seaborn as sns
 from corner import corner
 from eryn.backends import HDFBackend
-from eryn.ensemble import EnsembleSampler
 from eryn.moves import (
     DistributionGenerateRJ,
     GaussianMove,
@@ -46,6 +45,7 @@ parser.add_argument('--label', '-label', default='out', type=str, help="Label fo
 parser.add_argument('--prior', '-prior', type=str, help='Prior json file')
 parser.add_argument('--PE_samples', type=str, help='PE samples npz file')
 parser.add_argument('--injs', '-injs', type=str, help='Injections npz file')
+parser.add_argument('--ignore_events', type=str, nargs='+', help='Which events (if any) to ignore')
 
 #runtime arguments
 parser.add_argument('--nwalkers', '-nwalkers', type=int, default=50, help='Number of walkers per temperature')
@@ -279,7 +279,7 @@ for branch_idx, input_dict in enumerate(input_priordicts):
     )
 
 # save hp_ordering, latex parameter names, and nleaves_min_max of each branch
-if not args.test:
+if (not args.test) and (args.nsteps + args.burn): # don't overwrite if just replotting
     with open(os.path.join(outdir, "hyperparameter_ordering_metainfo.json"), "w") as f:
         json.dump(data.hp_ordering, f, indent=4, default=lambda x: str(x.__class__))
     with open(os.path.join(outdir, "nleaves_min_max.json"), "w") as f:
@@ -303,6 +303,17 @@ with np.load(args.injs) as f:
     }
     injections["total_generated"] = int(f["total_generated"])
     injections["TOBS"] = xp.asarray(float(f["Tobs_yr"]), dtype=xp.float32)
+
+if args.ignore_events:
+    event_names_list = np.loadtxt(args.PE_samples.replace("PE_samples.npz", "waveforms.txt"), dtype=str)[:, 0]
+    inds_delete = xp.asarray([int(np.where(event_names_list == name)[0]) for name in args.ignore_events])
+    
+    # remove events from PE_samples
+    for k, v in PE_samples.items():
+        if v.size > 1:
+            PE_samples[k] = xp.delete(v, inds_delete, axis=0)
+    
+    print(f"Removed {len(inds_delete)} events from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)")
 
 if args.test:
     # downsample injections and PE
@@ -348,12 +359,11 @@ backend = HDFBackend(backend_path)
 if os.path.exists(backend_path):
     if backend.initialized and backend.iteration > 0:
         state = backend.get_last_sample()
+        print(f"Initializing from previous run at {backend_path} with iter={backend.iteration}")
     else:
         os.remove(backend_path)  # faulty backend / it hasn't been run
 
-if os.path.exists(backend_path):
-    print(f"Initializing from previous run at {backend_path} with iter={backend.iteration}")
-else:
+if not os.path.exists(backend_path):
     # Initialize parameter chains (walker positions)
     # coords is a dict keyed by branch name each of shape:
     #   (ntemps, nwalkers, nleaves_max, ndims) drawn from priors.
@@ -567,7 +577,7 @@ ensemble_kwargs = dict(
 
 if nsteps + burn:
     # this wrapper is just to handle errors in case of incompatible existing backend
-    ensemble = EnsembleSampler(**ensemble_kwargs)
+    ensemble = utils.EnsembleSamplerWrapper(**ensemble_kwargs)
     if args.kde_update > 0 and rj_moves:
         kde_update_fn = UpdateKDEMove(log=logpath)
         # we need to store chain during burn in, so reset backend manually
@@ -616,11 +626,11 @@ if nsteps + burn:
     print("Maximum log posterior:", np.amax(logP))
     print(
         "Fraction of samples with -inf log posterior:",
-        np.sum(logP < -INF / 2) / logP.size,
+        np.sum(logP < -INF**0.5) / logP.size,
     )
     print(
         "# of samplers stuck at -inf:",
-        np.sum(np.sum(logP < -INF / 2, axis=0) > nsteps / 2),
+        np.sum(np.sum(logP < -INF**0.5, axis=0) > nsteps / 2),
     )
     nsamps, nwalker = logP.shape
 
@@ -1201,7 +1211,7 @@ if not args.skip_corner:  # skip for debugging
     for comp_label, comp_label_sig in zip(
         nonsmall_comp_labels, nonsmall_comp_label_sigs, strict=True
     ):
-        if save_or_not(f"corner_{comp_label}*pdf"):
+        if save_or_not(f"corner_{utils.get_safe_fn(comp_label)}*pdf"):
             bn, comp_idx = comp_label_sig
 
             sb = samples_dict[bn]
@@ -1520,11 +1530,12 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
         all_handles, all_labels = [], []
         for ax in axes[-1]:  # last row
             h, l = ax.get_legend_handles_labels()
-            l, h = utils.sort_lists(l, h)
-            for h_, l_ in zip(h, l, strict=True):
-                if l_ not in all_labels:
-                    all_handles.append(h_)
-                    all_labels.append(l_)
+            if len(h):
+                l, h = utils.sort_lists(l, h)
+                for h_, l_ in zip(h, l, strict=True):
+                    if l_ not in all_labels:
+                        all_handles.append(h_)
+                        all_labels.append(l_)
         ncol = len(all_handles)
         if ncol > 5:
             ncol = int(np.ceil(len(all_handles) / 2))
@@ -1565,7 +1576,7 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
     fn_parts = [param_name]
     if use_labels:
         fn_parts.append("labelled")
-    elif model_sig_name is not None:
+    if model_sig_name is not None:
         fn_parts.append(utils.get_safe_fn(model_sig_name))
     fn = f"{'_'.join(fn_parts)}.pdf"
     plt.savefig(os.path.join(figpath, fn))
