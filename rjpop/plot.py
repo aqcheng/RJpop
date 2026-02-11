@@ -30,9 +30,9 @@ def plot_ppds(
         for ppd in ppds:  # plot individual ppds
             if np.any(ppd > 0):
                 if swap_xy:
-                    ax.plot(ppd, x, color=color, alpha=0.1, lw=0.1)
+                    ax.plot(ppd, x, color=color, alpha=0.15, lw=0.1)
                 else:
-                    ax.plot(x, ppd, color=color, alpha=0.1, lw=0.1)
+                    ax.plot(x, ppd, color=color, alpha=0.15, lw=0.1)
         if label is not None:
             ax.plot([], [], lw=1, color=color, label=label)
 

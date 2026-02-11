@@ -1,3 +1,5 @@
+from typing import Literal
+
 import numpy as np
 import utils
 from scipy.stats import gaussian_kde
@@ -203,21 +205,25 @@ def eval_param_marginals(x_arr, branch_idx, param, hyperparams):
     return parent_model.get_marginal_pdf(x, param, **parent_model_hp_vals_dict)
 
 
-def vectorize_moments_dict(moments_dict, rescale=True):
+def vectorize_moments_dict(moments_dict, rescale: Literal["auto", "manual", None] = None):
     """
     Turn the moments dict output by `eval_param_moments` into feature vectors.
     Rescales if needed.
     """
     res = []
     for p, (mu, sig) in moments_dict.items():
-        scale = utils.PARAM_SCALES[p] if rescale else 1
+        scale = 1
+        if rescale == "auto":
+            scale = xp.sqrt(xp.nanvar(mu) + xp.nanvar(sig) + xp.nanmean(sig) ** 2)
+        elif rescale == "manual":
+            scale = utils.PARAM_SCALES[p]
         res.extend([mu / scale, sig / scale])
 
     return xp.stack(res, axis=-1).astype(xp.float32)
     # should be (nsamples, ncomp, dfeat) or (nleaves_tot, dfeat) if not grouped
 
 
-def compute_branch_moment_features(branch_idx, hps, branch_groups=None):
+def compute_branch_moment_features(branch_idx, hps, branch_groups=None, autoscale=True):
     """
     Build a moment-based feature vector for a single RJMCMC leaf, scaled by the typical parameter
     scales set in utils.PARAM_SCALES.
@@ -248,12 +254,15 @@ def compute_branch_moment_features(branch_idx, hps, branch_groups=None):
         moments_dict.update(eval_param_moments(branch_idx, p, hps, branch_groups))
 
     feat_params = moments_dict.keys()
-    feats = vectorize_moments_dict(moments_dict, rescale=True)
+    rescale = "auto" if autoscale else "manual"
+    feats = vectorize_moments_dict(moments_dict, rescale=rescale)
 
     return feats, feat_params
 
 
-def label_samples_kmeans(branch_idx, samples_loc, samples_global, ncomp, rng_seed=0):
+def label_samples_kmeans(
+    branch_idx, samples_loc, samples_global, ncomp, autoscale=False, rng_seed=0
+):
     """Assign stable component labels via global KMeans on moment features.
 
     This performs a *global* clustering over all active leaves across samples for
@@ -277,7 +286,7 @@ def label_samples_kmeans(branch_idx, samples_loc, samples_global, ncomp, rng_see
     hps[branch_idx] = xp.asarray(samples_loc)
     hps[-1] = xp.asarray(samples_global)
 
-    feats, feat_params = compute_branch_moment_features(branch_idx, hps)
+    feats, feat_params = compute_branch_moment_features(branch_idx, hps, autoscale=autoscale)
     feats = utils.to_numpy(feats)
     dfeats = feats.shape[-1]
 
@@ -317,7 +326,7 @@ def subpop_kdes_from_samples(samples):
 
     samples_shaped = samples.copy()
     samples_shaped.update(
-        {bn: arr.reshape((-1,)+arr.shape[-2:]) for bn, arr in samples.items() if arr.ndim > 3}
+        {bn: arr.reshape((-1,) + arr.shape[-2:]) for bn, arr in samples.items() if arr.ndim > 3}
     )
 
     for branch_idx, branch_name in enumerate(branch_names):

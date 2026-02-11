@@ -908,6 +908,7 @@ else:
                     samples_loc=samples_loc,
                     samples_global=samples_global,
                     ncomp=ncomp,
+                    autoscale=True, # scale params automatically instead of manually
                     rng_seed=args.seed + branch_idx + 1,
                 )
                 samples_loc_sorted = samples_loc
@@ -1279,10 +1280,10 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
         ).item()
 
 # construct grid for evaluating data
-ngrid = 101
+ngrid = 256
 data_grid = {
-    "mass_1_source": np.linspace(2, args.mmax_plot, 5 * ngrid),
-    "mass_2_source": np.linspace(2, args.mmax_plot, 5 * ngrid),
+    "mass_1_source": np.linspace(2, args.mmax_plot, 2 * ngrid),
+    "mass_2_source": np.linspace(2, args.mmax_plot, 2 * ngrid),
     "mass_ratio": np.linspace(0, 1, ngrid),
     "chi_eff": np.linspace(-1, 1, ngrid),
     "redshift": np.linspace(0, 1.5, ngrid),
