@@ -1,4 +1,4 @@
-scratch/
+scratch/*
 .ipynb_checkpoints
 .vscode
 results/

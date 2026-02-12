@@ -129,8 +129,8 @@ MODELS = {
 PARAM_SCALES = {  # characteristic scales for each parameter
     "mass_1_source": 8.0,
     "mass_2_source": 8.0,
-    "mass_ratio": 0.25,
-    "chi_eff": 0.04,
+    "mass_ratio": 0.3,
+    "chi_eff": 0.1,
 }
 RATE_FACTOR = 10.0
 
@@ -356,14 +356,14 @@ def get_move_acceptance_fraction(moves, temp_index=None):
 # Code is pretty much lifted directly from eryn.ensemble.EnsembleSampler
 
 
-def acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
+def acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     frac = backend.accepted[temp_index] / float(backend.iteration)
     return np.mean(frac), np.std(frac)
 
 
-def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
+def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     if not backend.rj:
@@ -373,7 +373,7 @@ def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> f
     return np.mean(frac), np.std(frac)
 
 
-def swap_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> float:
+def swap_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     return backend.swaps_accepted / float(backend.iteration * backend.nwalkers)

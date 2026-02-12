@@ -279,7 +279,7 @@ for branch_idx, input_dict in enumerate(input_priordicts):
     )
 
 # save hp_ordering, latex parameter names, and nleaves_min_max of each branch
-if (not args.test) and (args.nsteps + args.burn): # don't overwrite if just replotting
+if (not args.test) and (args.nsteps + args.burn):  # don't overwrite if just replotting
     with open(os.path.join(outdir, "hyperparameter_ordering_metainfo.json"), "w") as f:
         json.dump(data.hp_ordering, f, indent=4, default=lambda x: str(x.__class__))
     with open(os.path.join(outdir, "nleaves_min_max.json"), "w") as f:
@@ -305,15 +305,21 @@ with np.load(args.injs) as f:
     injections["TOBS"] = xp.asarray(float(f["Tobs_yr"]), dtype=xp.float32)
 
 if args.ignore_events:
-    event_names_list = np.loadtxt(args.PE_samples.replace("PE_samples.npz", "waveforms.txt"), dtype=str)[:, 0]
-    inds_delete = xp.asarray([int(np.where(event_names_list == name)[0]) for name in args.ignore_events])
-    
+    event_names_list = np.loadtxt(
+        args.PE_samples.replace("PE_samples.npz", "waveforms.txt"), dtype=str
+    )[:, 0]
+    inds_delete = xp.asarray(
+        [int(np.where(event_names_list == name)[0]) for name in args.ignore_events]
+    )
+
     # remove events from PE_samples
     for k, v in PE_samples.items():
         if v.size > 1:
             PE_samples[k] = xp.delete(v, inds_delete, axis=0)
-    
-    print(f"Removed {len(inds_delete)} events from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)")
+
+    print(
+        f"Removed {len(inds_delete)} events from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)"
+    )
 
 if args.test:
     # downsample injections and PE
@@ -381,6 +387,7 @@ if not os.path.exists(backend_path):
 
     # check that the first mass branch has one guy that has support at m=10
     mchar = 10
+    mock_data = {"mass_1_source": mchar, "mass_ratio": 0.9, "mass_2_source": mchar*0.9}
     b_idx_check = [
         b_idx for b_idx in range(len(data.branch_names)) if "mass" in data.hp_ordering[b_idx]
     ][0]
@@ -404,11 +411,11 @@ if not os.path.exists(backend_path):
             input_hps = [xp.asarray(coords[bn]) for bn in data.branch_names]
 
             if b_idx == b_idx_check:
-                pdf_vals = data.eval_param_marginals(
-                    mchar, b_idx, "mass_1_source", input_hps
+                pdf_vals = data.eval_param_model(
+                    mock_data, b_idx, "mass", input_hps
                 ).reshape((args.ntemps, args.nwalkers, ncomps))
                 bad_groups_mask = xp.logical_or(
-                    bad_groups_mask, xp.all(pdf_vals < 1e-6, axis=-1)
+                    bad_groups_mask, xp.all(pdf_vals < 1e-12, axis=-1)
                 )  # no leaves have support at mchar
                 print(
                     f"    frac of bad groups from p(m) check ({bn}): {xp.sum(bad_groups_mask)}/{bad_groups_mask.size}"
@@ -626,11 +633,11 @@ if nsteps + burn:
     print("Maximum log posterior:", np.amax(logP))
     print(
         "Fraction of samples with -inf log posterior:",
-        np.sum(logP < -INF**0.5) / logP.size,
+        np.sum(logP < -(INF**0.5)) / logP.size,
     )
     print(
         "# of samplers stuck at -inf:",
-        np.sum(np.sum(logP < -INF**0.5, axis=0) > nsteps / 2),
+        np.sum(np.sum(logP < -(INF**0.5), axis=0) > nsteps / 2),
     )
     nsamps, nwalker = logP.shape
 
@@ -889,6 +896,7 @@ else:
     samples_dict = {}
     labels_dict = {}
     feats_dict = {}
+    feat_scales_dict = {}
 
     samples_global = samples_unsorted["global"]
     nsamps = samples_global.shape[0]
@@ -903,15 +911,16 @@ else:
             ncomp = n_labelled_comps[branch_idx]
             try:
                 print(f"   ...sorting branch {branch_name} via k-means with {ncomp} components...")
-                labels_loc, feats, feat_params = data.label_samples_kmeans(
+                labels_loc, feats, feat_scales = data.label_samples_kmeans(
                     branch_idx=branch_idx,
                     samples_loc=samples_loc,
                     samples_global=samples_global,
                     ncomp=ncomp,
-                    autoscale=True, # scale params automatically instead of manually
+                    autoscale=True,  # scale params automatically instead of manually
                     rng_seed=args.seed + branch_idx + 1,
                 )
                 samples_loc_sorted = samples_loc
+                feat_scales_dict[branch_name] = feat_scales
 
             except Exception as e:
                 print(
@@ -966,7 +975,7 @@ else:
     # save samples_dict
     np.save(
         os.path.join(datapath, "samples_and_labels.npy"),
-        {"samples": samples_dict, "labels": labels_dict, "feats": feats_dict},
+        {"samples": samples_dict, "labels": labels_dict, "feats": feats_dict, "feat_scales": feat_scales_dict},
         allow_pickle=True,
     )
     print("Saved samples_and_labels.npy")
@@ -1059,24 +1068,22 @@ submodel_model_signames_all = {
 # dictionary that maps submodel name -> which model it belongs to (e.g. 'PL A, gauss B' -> (1 PL, 1 gauss))
 
 # submodel signatures are a tuple of counts corresponding to each component in comp_label_sigs
-# same as above - relative evidences
-submodel_bf_all = counts_ / np.amax(counts) # use same relative factor as above
-utils.print_to(logpath, "\n\nSUBMODEL BAYES FACTORS (relative to preferred model):")
-pad = max([len(str(list(s))) for s in submodel_sig_names_all]) + 1
-for sig_name, bf in zip(submodel_sig_names_all, submodel_bf_all, strict=True):
-    utils.print_to(logpath, f"{sig_name:<{pad}}: {bf:.5f}")
-
 submodel_names, submodel_sigs = [], []
 submodel_inds, submodel_bfs = [], []
-for t, bf in enumerate(submodel_bf_all):
-    if bf > bf_threshold:  # ignore insignificant models:
-        idx = np.nonzero(inv == t)[0]
-        submodel_inds.append(idx.copy())
-        submodel_sigs.append(submodel_sigs_all[t])
-        submodel_names.append(submodel_sig_names_all[t])
-        submodel_bfs.append(float(bf))
-submodel_names.append(0)  # for all non-rj parameters
-submodel_inds.append(np.arange(nsamples))
+if rj_branches:
+    # same as above - relative evidences
+    submodel_bf_all = counts_ / np.amax(counts)  # use same relative factor as above
+    utils.print_to(logpath, "\n\nSUBMODEL BAYES FACTORS (relative to preferred model):")
+    for sig_name, bf in zip(submodel_sig_names_all, submodel_bf_all, strict=True):
+        utils.print_to(logpath, f"{sig_name:<{pad}}: {bf:.5f}")
+
+    for t, bf in enumerate(submodel_bf_all):
+        if bf > bf_threshold:  # ignore insignificant models:
+            idx = np.nonzero(inv == t)[0]
+            submodel_inds.append(idx.copy())
+            submodel_sigs.append(submodel_sigs_all[t])
+            submodel_names.append(submodel_sig_names_all[t])
+            submodel_bfs.append(float(bf))
 
 # get R02s aggregated by label
 R02s_by_label = []
@@ -1379,7 +1386,9 @@ else:
     res, spin_res = None, None
 
 
-def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, model_sig_name=None):
+def plot_model_ppd(
+    param_name, color_tot="cornflowerblue", use_labels=True, plot_submodels=False, max_plot=4
+):
     """
     Plot PPDs using one subplot per RJ model (top-N by posterior frequency).
 
@@ -1391,27 +1400,20 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
     """
 
     # get right draw ctx
-    if model_sig_name is None:
+    if plot_submodels:
+        model_draw_ctxs = draw_ctxs["submodel"]
+        bfs = submodel_bfs
+    else:
         model_draw_ctxs = draw_ctxs["model"]
         bfs = bayes_factors
-    else:
-        assert model_sig_name in sig_names_all, (
-            f"Invalid model signature {model_sig_name}. Valid signatures: {sig_names_all}"
-        )
-        model_draw_ctxs = {
-            k: v
-            for k, v in draw_ctxs["submodel"].items()
-            if submodel_model_signames_all.get(k) == model_sig_name
-        }
-        bfs = [submodel_bfs[submodel_names.index(name)] for name in model_draw_ctxs.keys()]
-        model_draw_ctxs[0] = draw_ctxs["submodel"][0]
 
     # sort by bf
     sig_names = list(model_draw_ctxs.keys())
-    bfs.append(-1)  # put combined model last; sig_names already includes sig_names[-1] = 0
+    if 0 in sig_names:
+        bfs.append(-1)  # put combined model last; sig_names already includes sig_names[-1] = 0
     bfs, sig_names = utils.sort_lists(bfs, sig_names, strict=False, reverse=True)
 
-    nplot = min(len(sig_names), 5)  # at most 5 panels
+    nplot = min(len(sig_names), max_plot)  # at most max_plot panels
     bfs = bfs[:nplot]
     sig_names = sig_names[:nplot]
 
@@ -1472,7 +1474,7 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
 
                 # each ppd is (nsamples, ngrid)
                 for label_idx, ppd in enumerate(branch_rate_ppd_by_label):
-                    if len(data.branch_names) > 2: # legend not needed if only 1 local branch
+                    if len(data.branch_names) > 2:  # legend not needed if only 1 local branch
                         comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
                         legend_label = plot.textsc_ify(comp_label)
                     else:
@@ -1502,7 +1504,7 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
                 bf = f"{bfs[model_idx]:.2f}" if bfs[model_idx] > 0.01 else f"{bfs[model_idx]:.2e}"
                 plt_label = plot.textsc_ify(f"{sig} ($\\mathcal{{B}}={bf}$)")
             elif rj_branches:  # no label needed unless RJ
-                plt_label = plot.textsc_ify("Combined" + ("" if model_sig_name is None else f" - {model_sig_name}"))
+                plt_label = plot.textsc_ify("Combined")
             ax_tot.text(
                 0.96,
                 0.95,
@@ -1529,14 +1531,21 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
 
         # legend
         all_handles, all_labels = [], []
-        for ax in axes[-1]:  # last row
-            h, l = ax.get_legend_handles_labels()
-            if len(h):
-                l, h = utils.sort_lists(l, h)
-                for h_, l_ in zip(h, l, strict=True):
-                    if l_ not in all_labels:
-                        all_handles.append(h_)
-                        all_labels.append(l_)
+
+        def _collect_handles_labels(axes):
+            for ax in axes:
+                h, l = ax.get_legend_handles_labels()
+                if len(h):
+                    l, h = utils.sort_lists(l, h)
+                    for h_, l_ in zip(h, l, strict=True):
+                        if l_ not in all_labels:
+                            all_handles.append(h_)
+                            all_labels.append(l_)
+
+        if 0 not in sig_names and len(axes) > 1:
+            _collect_handles_labels(axes[:-1, 0])  # first column
+        _collect_handles_labels(axes[-1])  # last row
+
         ncol = len(all_handles)
         if ncol > 5:
             ncol = int(np.ceil(len(all_handles) / 2))
@@ -1577,8 +1586,8 @@ def plot_model_ppd(param_name, color_tot="cornflowerblue", use_labels=True, mode
     fn_parts = [param_name]
     if use_labels:
         fn_parts.append("labelled")
-    if model_sig_name is not None:
-        fn_parts.append(utils.get_safe_fn(model_sig_name))
+    if plot_submodels:
+        fn_parts.append("submodels")
     fn = f"{'_'.join(fn_parts)}.pdf"
     plt.savefig(os.path.join(figpath, fn))
     print(f"Saved {fn}")
@@ -1615,13 +1624,13 @@ if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
         # don't need to plot unlabelled twice
         for b_idx, bn in enumerate(data.branch_names[:-1]):
             if data.nleaves_max_dict[bn] > 1:
-                if data.get_parent_param(b_idx, param_name) in data.hp_ordering[b_idx]:  # rj
+                if data.get_parent_param(b_idx, param_name) in data.hp_ordering[b_idx]:  # local
                     ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
                         param_name, use_labels=True
                     )
                     if bn in rj_branches:
                         submodel_ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
-                            param_name, use_labels=True, model_sig_name=best_sig_name
+                            param_name, use_labels=True, plot_submodels=True
                         )
                     break
 

@@ -153,6 +153,14 @@ def unpack_hp_vals(branch_idx, param, hyperparams, branch_groups=None, param_dic
                 hp_vals,
                 model_hp_vals_dict[hp],
             )
+        if hp == "xmax" and "xmax" in model_hp_vals_dict:
+            # take the most stringent maximum
+            # hp might have nans in it, so we need to handle that
+            model_hp_vals_dict[hp] = xp.where(
+                (hp_vals < model_hp_vals_dict[hp]) & xp.isfinite(hp_vals),
+                hp_vals,
+                model_hp_vals_dict[hp],
+            )
         else:
             model_hp_vals_dict[hp] = hp_vals
 
@@ -205,18 +213,26 @@ def eval_param_marginals(x_arr, branch_idx, param, hyperparams):
     return parent_model.get_marginal_pdf(x, param, **parent_model_hp_vals_dict)
 
 
+def get_auto_scale(moments_dict):
+    scales = {}
+    for p, (mu, sig) in moments_dict.items():
+        scales[p] = xp.sqrt(xp.nanvar(mu) + xp.nanvar(sig) + xp.nanmean(sig) ** 2)
+    return scales
+
 def vectorize_moments_dict(moments_dict, rescale: Literal["auto", "manual", None] = None):
     """
     Turn the moments dict output by `eval_param_moments` into feature vectors.
     Rescales if needed.
     """
     res = []
+    if rescale == "auto":
+        scales_dict = get_auto_scale(moments_dict)
+    elif rescale == "manual":
+        scales_dict = utils.PARAM_SCALES
+    else:
+        scales_dict = {}
     for p, (mu, sig) in moments_dict.items():
-        scale = 1
-        if rescale == "auto":
-            scale = xp.sqrt(xp.nanvar(mu) + xp.nanvar(sig) + xp.nanmean(sig) ** 2)
-        elif rescale == "manual":
-            scale = utils.PARAM_SCALES[p]
+        scale = scales_dict.get(p, 1)
         res.extend([mu / scale, sig / scale])
 
     return xp.stack(res, axis=-1).astype(xp.float32)
@@ -253,11 +269,10 @@ def compute_branch_moment_features(branch_idx, hps, branch_groups=None, autoscal
     for p in utils.skip_dunder(hp_ordering[branch_idx].keys()):
         moments_dict.update(eval_param_moments(branch_idx, p, hps, branch_groups))
 
-    feat_params = moments_dict.keys()
-    rescale = "auto" if autoscale else "manual"
-    feats = vectorize_moments_dict(moments_dict, rescale=rescale)
+    feats = vectorize_moments_dict(moments_dict, rescale="auto" if autoscale else "manual")
+    feat_scales = get_auto_scale(moments_dict) if autoscale else utils.PARAM_SCALES
 
-    return feats, feat_params
+    return feats, [float(i) for i in feat_scales.values()]
 
 
 def label_samples_kmeans(
@@ -275,9 +290,8 @@ def label_samples_kmeans(
         leaves, or -1 for inactive.
     feats : np.ndarray
         Shape (nsamples, nleaves_max, 2 * nparams).
-    feat_params : list
-        List of parameter names used to compute the features, in order. There
-        are 2 * len(feat_params) features per sample.
+    scales : dict
+        Dictionary of parameter scales used to whiten the features.
     """
     nsamples, nleaves_max, _ = samples_loc.shape
     active = utils.leaf_active_mask(samples_loc)
@@ -286,7 +300,7 @@ def label_samples_kmeans(
     hps[branch_idx] = xp.asarray(samples_loc)
     hps[-1] = xp.asarray(samples_global)
 
-    feats, feat_params = compute_branch_moment_features(branch_idx, hps, autoscale=autoscale)
+    feats, scales = compute_branch_moment_features(branch_idx, hps, autoscale=autoscale)
     feats = utils.to_numpy(feats)
     dfeats = feats.shape[-1]
 
@@ -310,7 +324,7 @@ def label_samples_kmeans(
     labels_flat[active_flat] = labels_act.astype(np.int32)
     labels = labels_flat.reshape(nsamples, nleaves_max)
 
-    return labels, feats, list(feat_params)
+    return labels, feats, scales
 
 
 def subpop_kdes_from_samples(samples):
@@ -644,8 +658,7 @@ def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
         for b_idx, branch_moments_dict in enumerate(all_branch_moments):
             nleaves_max = nleaves_max_dict[branch_names[b_idx]]
             if nleaves_max > 1:
-                branch_feats = vectorize_moments_dict(branch_moments_dict, rescale=True)
-                # is this the fastest way to do this?
+                branch_feats = vectorize_moments_dict(branch_moments_dict, rescale="manual")
                 bad_groups.update(
                     get_bad_leaves(branch_feats, groups[b_idx], nleaves_max, min_sep=min_sep)
                 )
