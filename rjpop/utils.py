@@ -21,7 +21,9 @@ from xp import xp
 XMAX_FIX = 300.0
 MODELS = {
     "mass": {
+        "param_latex": {"m2max": r"$m_{2,\max}$"},
         "m1_q": {"model": pdfs.m1_q_model, "param_latex": {}},
+        "m1_q_m2max": {"model": pdfs.m1_q_m2max_model, "param_latex": {"m2max": r"$m_{2,\max}$"}},
         "gaussian_copula": {
             "model": pdfs.gaussian_copula_mass_model,
             "param_latex": {"rho": r"$\rho$"},
@@ -131,8 +133,9 @@ PARAM_SCALES = {  # characteristic scales for each parameter
     "mass_2_source": 8.0,
     "mass_ratio": 0.3,
     "chi_eff": 0.1,
+    "redshift": 1.0,
 }
-RATE_FACTOR = 10.0
+RATE_FACTOR = 1.0
 
 ### MISC UTILS
 
@@ -161,7 +164,9 @@ def check_min_separation(X, min_sep, xp=xp):
 
 def sort_lists(*lists, reverse=False, strict=True):
     """Sorts multiple lists by the first list."""
-    return [list(x) for x in zip(*sorted(zip(*lists, strict=strict), reverse=reverse), strict=True)]
+    return [
+        list(x) for x in zip(*sorted(zip(*lists, strict=strict), reverse=reverse), strict=True)
+    ]
 
 
 def to_numpy(arr):
@@ -236,7 +241,7 @@ def recursive_get(datadict, key):
 
 
 def get_safe_fn(name):
-    return "_".join(re.split(r"\W+", name))
+    return "_".join(re.split(r"\W+", str(name)))
 
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -270,11 +275,10 @@ def leaf_active_mask(samples_loc):
 
 def get_integrated_act_wrap(samples, average=True, fast=False):
     """
-    Compute the integrated auto-correlation time for RJ moves.
+    Compute the integrated auto-correlation time. For RJ moves, passes the number of leaves and total rate to eryn's `get_integrated_act` to compute the autocorrelation time.
 
     Args:
         samples (dict): The samples to compute the auto-correlation time for.
-        nleaves (dict): The number of active leaves. This is only used for RJ branches. Default is None.
         average (bool): Whether to average the auto-correlation time across all dimensions. Default is True.
         fast (bool): Whether to use the fast method for computing the auto-correlation time. Default is False.
     Returns:
@@ -285,11 +289,14 @@ def get_integrated_act_wrap(samples, average=True, fast=False):
         chain = samples[name]
         nsteps, ntemps, nw, nl, ndims = chain.shape
         if np.any(np.isnan(chain)) and nl > 1:
-            # RJ branch - use number of active leaves to calculate autocorrelation time
-            n_active_leaves = np.count_nonzero(leaf_active_mask(chain), axis=-1, keepdims=True)
-            tau_rj = get_integrated_act(n_active_leaves, average=average, fast=fast)
-            if np.isfinite(tau_rj):
-                tau[name] = tau_rj
+            # RJ branch - use number of active leaves + total rate to calculate autocorrelation time
+            active_mask = leaf_active_mask(chain)
+            n_active_leaves = np.count_nonzero(active_mask, axis=-1, keepdims=True)
+            tot_rate = np.sum(np.where(active_mask, chain[..., -1], 0.0), axis=-1, keepdims=True)
+            tau_rj = get_integrated_act(
+                np.concatenate((n_active_leaves, tot_rate), axis=-1), average=average, fast=fast
+            )
+            tau[name] = tau_rj[np.isfinite(tau_rj)]
 
         else:
             # non RJ branch
@@ -356,14 +363,14 @@ def get_move_acceptance_fraction(moves, temp_index=None):
 # Code is pretty much lifted directly from eryn.ensemble.EnsembleSampler
 
 
-def acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
+def acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> tuple[float, float]:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     frac = backend.accepted[temp_index] / float(backend.iteration)
     return np.mean(frac), np.std(frac)
 
 
-def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
+def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> tuple[float, float]:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     if not backend.rj:
@@ -373,7 +380,9 @@ def rj_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (
     return np.mean(frac), np.std(frac)
 
 
-def swap_acceptance_fraction(obj: EnsembleSampler | Backend, temp_index=None) -> (float, float):
+def swap_acceptance_fraction(
+    obj: EnsembleSampler | Backend, temp_index=None
+) -> tuple[float, float]:
     assert isinstance(obj, (EnsembleSampler, Backend)), "obj must be an EnsembleSampler or Backend"
     backend = obj.backend if isinstance(obj, EnsembleSampler) else obj
     return backend.swaps_accepted / float(backend.iteration * backend.nwalkers)

@@ -53,6 +53,34 @@ def plot_ppds(
             ax.fill_between(x, low, high, color=color, alpha=fill_alpha, label=label)
 
 
+def plot_chains(
+    data, ax=None, color="cornflowerblue", xlabel="step", ylabel=None, walkers_plot=None
+):
+    """
+    Plots chains of a 2D data array of shape (nsteps, nwalkers) on a matplotlib axis.
+    """
+    if ax is None:
+        fig, ax = plt.subplots()
+    if walkers_plot is None:
+        inds = np.arange(data.shape[-1])
+    elif isinstance(walkers_plot, int):
+        if walkers_plot > data.shape[-1]:
+            inds = np.arange(data.shape[-1])
+        else:
+            inds = np.random.default_rng().choice(data.shape[-1], walkers_plot, replace=False)
+    elif hasattr(walkers_plot, "__iter__"):
+        inds = walkers_plot
+    else:
+        raise ValueError("walkers_plot must be None, int, or iterable of int")
+
+    for i in inds:  # iterate through all walkers
+        ax.plot(data[:, i], lw=0.2, alpha=0.2, color=color)
+    ax.plot(np.mean(data, axis=-1), color="k", ls="--")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    return ax
+
+
 def get_level_values(Z, percentiles):
     """
     Z: 2D array of non-negative weights (already on the plotting grid).
@@ -170,7 +198,7 @@ def plot_2D_contours_and_marginals(
     ax_x.set_ylim(x_param_ylim)
     ax_y.set_xlim(y_param_ylim)
 
-    return [fig, ax_joint, ax_x, ax_y]
+    return fig, ax_joint, ax_x, ax_y
     # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
 
 
@@ -261,7 +289,11 @@ texnames = {
 
 
 def setup_and_plot_GWTC4(
-    param_name, ax, res: PopulationResult | None = None, spin_res: PopulationResult | None = None, label = True,
+    param_name,
+    ax,
+    res: PopulationResult | None = None,
+    spin_res: PopulationResult | None = None,
+    label=True,
 ):
 
     x, y = None, None
@@ -299,6 +331,8 @@ def setup_and_plot_GWTC4(
             xrange=(2, 80),
             yrange=(1e-3, 40),
         )
+        ylabel = ax.get_ylabel()
+        ax.set_ylabel(ylabel.replace("m_1", "m_2"))
         ax.set_xlabel(r"$m_2 \left[ \mathrm{M}_\odot \right]$")
         # don't plot LVK results
         return
@@ -331,7 +365,7 @@ def setup_and_plot_GWTC4(
     else:
         print(f"Unrecognized plotting parameter {param_name}")
         return
-    
+
     if not isinstance(label, str):
         label = label_default if label else None
 

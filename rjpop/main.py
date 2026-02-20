@@ -163,6 +163,7 @@ def _process_param_hp_priors(
         model_name = None
 
     hp_idx = hp_idx_start
+    params.add(param)
 
     # update infodict + priordict
     for hp, hp_range in input_param_priordict.items():
@@ -187,7 +188,6 @@ def _process_param_hp_priors(
                 data.hp_ordering[branch_idx]["__latex__"].append(
                     utils.MODELS[param_get]["param_latex"].get(hp, hp)
                 )
-            params.add(param)
 
             hp_idx += 1
 
@@ -297,6 +297,7 @@ with np.load(args.PE_samples) as f:
     PE_samples = {
         k: xp.asarray(v, dtype=xp.float32) for k, v in f.items() if k in params + ["prior"]
     }  # needed for initialization
+
 with np.load(args.injs) as f:
     injections = {
         k: xp.asarray(v, dtype=xp.float32) for k, v in f.items() if k in params + ["prior", "w"]
@@ -318,7 +319,7 @@ if args.ignore_events:
             PE_samples[k] = xp.delete(v, inds_delete, axis=0)
 
     print(
-        f"Removed {len(inds_delete)} events from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)"
+        f"Removed {len(inds_delete)} event(s) from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)"
     )
 
 if args.test:
@@ -387,7 +388,7 @@ if not os.path.exists(backend_path):
 
     # check that the first mass branch has one guy that has support at m=10
     mchar = 10
-    mock_data = {"mass_1_source": mchar, "mass_ratio": 0.9, "mass_2_source": mchar*0.9}
+    mock_data = {"mass_1_source": mchar, "mass_ratio": 0.9, "mass_2_source": mchar * 0.9}
     b_idx_check = [
         b_idx for b_idx in range(len(data.branch_names)) if "mass" in data.hp_ordering[b_idx]
     ][0]
@@ -411,9 +412,9 @@ if not os.path.exists(backend_path):
             input_hps = [xp.asarray(coords[bn]) for bn in data.branch_names]
 
             if b_idx == b_idx_check:
-                pdf_vals = data.eval_param_model(
-                    mock_data, b_idx, "mass", input_hps
-                ).reshape((args.ntemps, args.nwalkers, ncomps))
+                pdf_vals = data.eval_param_model(mock_data, b_idx, "mass", input_hps).reshape(
+                    (args.ntemps, args.nwalkers, ncomps)
+                )
                 bad_groups_mask = xp.logical_or(
                     bad_groups_mask, xp.all(pdf_vals < 1e-12, axis=-1)
                 )  # no leaves have support at mchar
@@ -503,7 +504,7 @@ for branch_name in rj_branches:
     gibbs_rate_arr[:, -1] = True
 
     simplex_move = RateMove(
-        utils.RATE_FACTOR / 3,
+        utils.RATE_FACTOR,
         branch_name,
         type="orthogonal",
         gibbs_sampling_setup=(branch_name, gibbs_rate_arr),
@@ -514,8 +515,8 @@ for branch_name in rj_branches:
         type="radial",
         gibbs_sampling_setup=(branch_name, gibbs_rate_arr),
     )
-    moves.append((simplex_move, 0.3))
-    moves.append((tot_move, 0.2))
+    moves.append((simplex_move, 0.4))
+    moves.append((tot_move, 0.4))
 
     # moves.append((GaussianMove(cov, gibbs_sampling_setup=(branch_name, gibbs_rate_arr)), 0.4))
     if args.test:
@@ -579,7 +580,7 @@ ensemble_kwargs = dict(
     rj_moves=rj_moves,
     fill_zero_leaves_val=-INF,
     backend=backend,
-    track_moves=False,  # we just need overall acceptance fraction, complicated with KDE update
+    track_moves=not (args.kde_update > 0),
 )
 
 if nsteps + burn:
@@ -664,7 +665,9 @@ else:
     last_state = state
 
 # print diagnostics
-utils.print_to(logpath, "\n########## PRINTING DIAGNOSTICS ##########\n")
+utils.print_to(
+    logpath, f"\n########## PRINTING DIAGNOSTICS -- iter = {backend.iteration} ##########\n"
+)
 acc_frac, acc_frac_std = utils.acceptance_fraction(backend)
 utils.print_to(logpath, f"Total acceptance fraction: {acc_frac:.2g} +/- {acc_frac_std:.2g}")
 if backend.rj:
@@ -675,28 +678,66 @@ if backend.rj:
 if args.ntemps > 1:
     utils.print_to(logpath, f"Swap acceptance fraction: {utils.swap_acceptance_fraction(backend)}")
 
-# plot log posterior
 
-for i in range(logP.shape[-1]):  # iterate through all walkers
-    plt.plot(logP[:, i], lw=0.2, alpha=0.2, color="cornflowerblue")
-# plt.axvline(x_break, color='r', lw=1)
-plt.axvline(discard, color="r", ls="--", lw=1)
-plt.plot(np.mean(logP, axis=-1), color="k", ls="--")
-plt.ylabel("log P")
-plt.xlabel("step")
-plt.ylim(bottom=np.nanpercentile(logP[:, 0], 1))
-plt.savefig(os.path.join(figpath, "logP_chains.png"))
-print("Saved log posterior chains in logP_chains.png")
+####### PLOT ALL CHAINS ######
+chain = backend.get_chain(temp_index=0)
+nsteps, nwalkers = logP.shape
+n_glob_params = len(data.hp_ordering[-1]["__latex__"])
+n_chain_plots = (
+    2 + len(rj_branches) + n_glob_params
+)  # logP, total rate, nleaves, global parameters
+fig, axes = plt.subplots(n_chain_plots, 1, figsize=(5, 2 * n_chain_plots), sharex=True)
+
+# logP
+plot.plot_chains(logP, ax=axes[0], xlabel=None, ylabel="log P")
+axes[0].set_ylim(np.nanpercentile(logP[discard:].ravel(), [1, 99]))
+# total rate
+R0_tot = np.nansum(
+    np.concatenate([chain[bn][..., -1] for bn in data.branch_names[:-1]], axis=-1), axis=-1
+)  # (nsteps, nwalkers)
+plot.plot_chains(R0_tot, ax=axes[1], xlabel=None, ylabel=r"$\mathcal{R}(0)$")
+axes[1].set_ylim(np.nanpercentile(R0_tot[discard:].ravel(), [1, 99]))
+# n leaves per branch
+for i, bn in enumerate(rj_branches):
+    ax_idx = i + 2
+    nleaves_branch = np.count_nonzero(
+        utils.leaf_active_mask(chain[bn]), axis=-1
+    )  # (nsteps, nwalkers)
+    plot.plot_chains(
+        nleaves_branch, ax=axes[ax_idx], xlabel=None, ylabel=f"{bn} " + r"$n_{\mathrm{leaves}}$"
+    )
+    axes[ax_idx].set_ylim(0, data.nleaves_max_dict[bn])
+
+# global parameters
+for i, param_latex in enumerate(data.hp_ordering[-1]["__latex__"]):
+    ax_idx = -n_glob_params + i
+    dat = chain["global"][..., 0, i]
+    plot.plot_chains(dat, ax=axes[ax_idx], xlabel=None, ylabel=param_latex)
+
+axes[-1].set_xlabel("step")
+axes[-1].set_xlim(0, nsteps)
+for ax in axes:
+    # plot discard line
+    ax.axvline(discard, color="r", ls="--", lw=1)
+
+plt.tight_layout(h_pad=0.1)
+plt.savefig(os.path.join(figpath, "chains.png"))
+print("Saved chains in chains.png")
 plt.close()
 
+#################################
+
 # compute thin
-chain = backend.get_chain(discard=discard)
-thin, tau = utils.get_thin_from_chain(chain, return_tau=True)
+thin, tau = utils.get_thin_from_chain(backend.get_chain(discard=discard), return_tau=True)
 utils.print_to(logpath, f"\nIntegrated autocorrelation times: {tau}")
 
+chain = backend.get_chain(discard=discard, thin=thin, temp_index=0)
 logP = backend.get_log_posterior(discard=discard, thin=thin)
 nsamples = logP[:, 0].size
 utils.print_to(logpath, f"Using thin {thin} and discard {discard} ({nsamples} samples)")
+
+
+REPLOT = args.replot or (args.nsteps + args.burn > 0)
 
 
 def save_or_not(path):  # determine if it needs to be replotted
@@ -707,9 +748,9 @@ def save_or_not(path):  # determine if it needs to be replotted
             path = os.path.join(datapath, path)
     if "*" in path:
         matches = glob(path)
-        res = len(matches) == 0 or args.replot
+        res = len(matches) == 0 or REPLOT
     else:
-        res = (not os.path.exists(path)) or args.replot
+        res = (not os.path.exists(path)) or REPLOT
     if not res:
         print(f"Skipping {path}")
     return res
@@ -736,48 +777,11 @@ if args.ntemps > 1 and save_or_not(temp_plotname):
     print(f"Saved log posterior temperature convergence in {temp_plotname}")
     plt.close()
 
-# prepare for big corner plot + sorting
-chain = backend.get_chain(discard=discard, thin=thin, temp_index=0)
-
-# plot nleaves chain if rj
-nleaves_plotname = "nleaves_chains.png"
-if rj_branches and save_or_not(nleaves_plotname):
-    fig, axes = plt.subplots(
-        len(rj_branches), 1, figsize=(4, 3 * len(rj_branches)), sharex=True, sharey=True
-    )
-    if len(rj_branches) == 1:
-        axes = [axes]
-    for ax, bn in zip(axes, rj_branches, strict=True):
-        nleaves_branch = np.count_nonzero(
-            utils.leaf_active_mask(chain[bn]), axis=-1
-        )  # (nsteps, nwalkers)
-        for walker_idx in rng.choice(nleaves_branch.shape[1], size=5, replace=False):
-            ax.plot(nleaves_branch[:, walker_idx], alpha=0.5, lw=0.5)
-        ax.plot(np.mean(nleaves_branch, axis=-1), color="k", ls="--")
-        ax.text(
-            0.5,
-            0.9,
-            bn,
-            transform=ax.transAxes,
-            ha="center",
-            va="center",
-            fontsize=12,
-            fontweight="bold",
-        )
-        ax.set_ylabel("num of leaves")
-
-    plt.xlabel("step")
-    plt.ylim(bottom=0)
-
-    plt.savefig(os.path.join(figpath, nleaves_plotname))
-    print(f"Saved nleaves chains in {nleaves_plotname}")
-    plt.close()
-
 # ----------------------------------
 # Post-processing: labeling and PPDs
 # ----------------------------------
 
-bf_threshold = 0.05
+bf_threshold = 0.1
 
 # RJ model selection:
 # Define a model as the tuple of per-branch active component counts across the
@@ -794,6 +798,7 @@ samples_unsorted = {
 nsamples = samples_unsorted["global"].shape[0]
 del chain
 
+sigs, bayes_factors = [], []
 sig_names, model_inds = [], []
 n_labelled_comps = np.ones(len(data.branch_names), dtype=np.int32)
 if rj_branches:
@@ -860,7 +865,6 @@ if rj_branches:
     for sig_name, bf in zip(sig_names_all, bayes_factors_all, strict=True):
         utils.print_to(logpath, f"{sig_name:<{pad}}: {bf:.5f}")
 
-    sigs, bayes_factors = [], []
     for t, bf in enumerate(bayes_factors_all):
         if bf > bf_threshold:  # ignore insignificant models:
             idx = np.nonzero(inv == t)[0]
@@ -880,8 +884,10 @@ else:
         [data.nleaves_max_dict[bn] for bn in data.branch_names], dtype=np.int32
     )
     best_model_idx = 0
+sigs.append(0)
 sig_names.append(0)  # for all non-rj parameters
 model_inds.append(np.arange(nsamples))
+bayes_factors.append(-1)
 
 samples_and_labels_datapath = os.path.join(datapath, "samples_and_labels.npy")
 if os.path.exists(samples_and_labels_datapath) and not args.replot:
@@ -891,7 +897,8 @@ if os.path.exists(samples_and_labels_datapath) and not args.replot:
     labels_dict = megadict["labels"]
     feats_dict = megadict["feats"]
 else:
-    print("\n Sorting samples via k-means...")
+    if rj_branches:
+        print("\n Sorting samples via k-means...")
 
     samples_dict = {}
     labels_dict = {}
@@ -975,7 +982,12 @@ else:
     # save samples_dict
     np.save(
         os.path.join(datapath, "samples_and_labels.npy"),
-        {"samples": samples_dict, "labels": labels_dict, "feats": feats_dict, "feat_scales": feat_scales_dict},
+        {
+            "samples": samples_dict,
+            "labels": labels_dict,
+            "feats": feats_dict,
+            "feat_scales": feat_scales_dict,
+        },
         allow_pickle=True,
     )
     print("Saved samples_and_labels.npy")
@@ -983,24 +995,51 @@ else:
 # convert to rate at z=0.2, consistent with LVK figures
 # assumes that redshift is a global model
 
-redshift_param_dict = data.hp_ordering[-1]["redshift"]
-z_02_factor = redshift_param_dict["model"].psi(
-    0.2,
-    **{
-        hp: samples_dict["global"][:, 0, col_idx]
-        for hp, col_idx in zip(
-            redshift_param_dict["model_hp_names"],
-            redshift_param_dict["col_idx"],
-            strict=True,
+
+def _get_z_factor(branch_idx=-1, samples=samples_dict, z=0.2):
+    if z == 0:
+        return 1.0
+    if "redshift" not in data.hp_ordering[branch_idx]:
+        assert "redshift" in data.hp_ordering[-1], (
+            f"redshift not found in branch {branch_idx} or global branch"
         )
-    },
-)
-z_02_factor = utils.to_numpy(z_02_factor)
+        branch_idx = -1
+    redshift_param_dict = data.hp_ordering[branch_idx]["redshift"]
+    if isinstance(samples, dict):
+        branch_samples = samples[data.branch_names[branch_idx]]
+    else:  # list of hyperparameters
+        branch_samples = samples[branch_idx]
+    z_02_factor = redshift_param_dict["model"].psi(
+        z,
+        **{
+            hp: branch_samples[..., col_idx]
+            for hp, col_idx in zip(
+                redshift_param_dict["model_hp_names"],
+                redshift_param_dict["col_idx"],
+                strict=True,
+            )
+        },
+    )
+    return utils.to_numpy(z_02_factor)
 
 
 # get rates by component (and label components)
 def _filter_rates(arr):
     return np.where(~np.isfinite(arr) | (arr < 0), 0.0, arr)
+
+
+def _get_rates(branch_idx, samples=samples_dict, z=0.2):
+    if isinstance(samples, dict):
+        samples = [utils.to_numpy(samples_dict.get(bn, [0])) for bn in data.branch_names]
+    if branch_idx == -1 or branch_idx == len(data.branch_names) - 1:
+        # global - add rates together
+        rate = np.sum(
+            np.stack([_filter_rates(b_samples[..., -1]) for b_samples in samples]),
+            axis=0,
+        )
+    else:
+        rate = _filter_rates(samples[branch_idx][..., -1])
+    return rate * _get_z_factor(branch_idx, samples)
 
 
 # assign colors to components
@@ -1035,37 +1074,40 @@ for branch_name in data.branch_names[:-1]:
 
 # define and count submodels
 tot_n_labelled_comps = len(comp_label_sigs)
-submodel_counts = np.zeros((nsamples, tot_n_labelled_comps), dtype=np.int32)
-for col_idx, (rj_bn, comp_idx) in enumerate(comp_label_sigs):
-    submodel_counts[:, col_idx] += (labels_dict[rj_bn] == comp_idx).sum(axis=1)
-submodel_sigs_all, inv, counts_ = np.unique(
-    submodel_counts, axis=0, return_inverse=True, return_counts=True
-)
 submodel_sig_names_all, submodel_model_signames_all = [], []
-for sig in submodel_sigs_all:
-    submodel_sig_names_all.append(
-        ", ".join(
-            [
-                comp_name
-                for comp_name, sig_count in zip(comp_labels, sig, strict=True)
-                for _ in range(sig_count)
-            ]
-        )
+if rj_branches:
+    submodel_counts = np.zeros((nsamples, tot_n_labelled_comps), dtype=np.int32)
+    for col_idx, (rj_bn, comp_idx) in enumerate(comp_label_sigs):
+        submodel_counts[:, col_idx] += (labels_dict[rj_bn] == comp_idx).sum(axis=1)
+    submodel_sigs_all, inv, counts_ = np.unique(
+        submodel_counts, axis=0, return_inverse=True, return_counts=True
     )
-    submodel_model_sig = []
-    col_idx_start = 0
-    for rj_bn in rj_branches:
-        col_idx_end = col_idx_start + n_labelled_comps[data.branch_names.index(rj_bn)]
-        submodel_model_sig.append(int(sum(sig[col_idx_start:col_idx_end])))
-        col_idx_start = col_idx_end
-    submodel_model_sig_name = sig_names_all[sigs_all.index(tuple(submodel_model_sig))]
-    submodel_model_signames_all.append(submodel_model_sig_name)
+    for sig in submodel_sigs_all:
+        submodel_sig_names_all.append(
+            ", ".join(
+                [
+                    comp_name
+                    for comp_name, sig_count in zip(comp_labels, sig, strict=True)
+                    for _ in range(sig_count)
+                ]
+            )
+        )
+        submodel_model_sig = []
+        col_idx_start = 0
+        for rj_bn in rj_branches:
+            col_idx_end = col_idx_start + n_labelled_comps[data.branch_names.index(rj_bn)]
+            submodel_model_sig.append(int(sum(sig[col_idx_start:col_idx_end])))
+            col_idx_start = col_idx_end
+        submodel_model_sig_name = sig_names_all[sigs_all.index(tuple(submodel_model_sig))]
+        submodel_model_signames_all.append(submodel_model_sig_name)
 
-submodel_model_signames_all = {
-    name: model_sig
-    for name, model_sig in zip(submodel_sig_names_all, submodel_model_signames_all, strict=True)
-}
-# dictionary that maps submodel name -> which model it belongs to (e.g. 'PL A, gauss B' -> (1 PL, 1 gauss))
+    submodel_model_signames_all = {
+        name: model_sig
+        for name, model_sig in zip(
+            submodel_sig_names_all, submodel_model_signames_all, strict=True
+        )
+    }
+    # dictionary that maps submodel name -> which model it belongs to (e.g. 'PL A, gauss B' -> (1 PL, 1 gauss))
 
 # submodel signatures are a tuple of counts corresponding to each component in comp_label_sigs
 submodel_names, submodel_sigs = [], []
@@ -1087,24 +1129,25 @@ if rj_branches:
 
 # get R02s aggregated by label
 R02s_by_label = []
-for bn in data.branch_names[:-1]:
+for b_idx, bn in enumerate(data.branch_names[:-1]):
     ncomps = samples_dict[bn].shape[1]
     labels = labels_dict.get(bn, None)
+    branch_R02s = _get_rates(b_idx)
     for comp_idx in range(ncomps):
         if labels is None:
-            R02s_by_label.append(_filter_rates(samples_dict[bn][:, comp_idx, -1]))
+            R02s_by_label.append(branch_R02s[:, comp_idx])
         else:
             R02s_by_label.append(
                 np.sum(
-                    _filter_rates(samples_dict[bn][..., -1]) * (comp_idx == labels),
+                    branch_R02s * (comp_idx == labels),
                     axis=1,
                 )
             )
-R02s_by_label = np.stack(R02s_by_label, axis=-1) * z_02_factor[:, None]  # (nsamples, ncomps_tot)
+R02s_by_label = np.stack(R02s_by_label, axis=-1)  # (nsamples, ncomps_tot)
 R02_tot = np.sum(R02s_by_label, axis=-1)
 branching_fracs = R02s_by_label / R02_tot[:, None]
 
-# R02_tot and z_02_factor have shape (nsamples,) (no extra dimensions)
+# R02_tot has shape (nsamples,) (no extra dimensions)
 
 ndraws = 500
 
@@ -1112,6 +1155,10 @@ ndraws = 500
 
 
 def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, **corner_kwargs):
+
+    if X.shape[1] <= 1 or X.ndim < 2:
+        print(f"Not enough dimensions for a corner plot (shape {X.shape})")
+        return
 
     X = np.asarray(X)
     good = np.all(np.isfinite(X), axis=1)
@@ -1231,12 +1278,13 @@ if not args.skip_corner:  # skip for debugging
             _corner_plot_wrapper(X, names, comp_label)
 
             # also plot a separate corner plot for the most preferred model
-            best_model_inds = model_inds[best_model_idx]
-            if bn in rj_branches:
-                X = sb[best_model_inds][labels_dict[bn][best_model_inds] == comp_idx]
-            else:
-                X = sb[best_model_inds][:, comp_idx]
-            _corner_plot_wrapper(X, names, f"{comp_label}_{sig_names[best_model_idx]}")
+            if rj_branches:
+                best_model_inds = model_inds[best_model_idx]
+                if bn in rj_branches:
+                    X = sb[best_model_inds][labels_dict[bn][best_model_inds] == comp_idx]
+                else:
+                    X = sb[best_model_inds][:, comp_idx]
+                _corner_plot_wrapper(X, names, f"{comp_label}_{sig_names[best_model_idx]}")
 
 ### extract and plot PPDs
 print("\nPlotting PPDs")
@@ -1248,43 +1296,42 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
     (model_inds, submodel_inds),
     strict=True,
 ):
-    draw_ctx_fn = f"{model_or_submodel}_draw_ctxs.npy"
-    if save_or_not(draw_ctx_fn):
-        # prepare draws for each models
-        draw_ctx = {}
-        for sig_name, inds in zip(sig_names_, model_inds_, strict=True):
-            samples_input, labels_input = [], []
-            if inds.size > ndraws:
-                sel_inds = rng.choice(inds, size=ndraws, replace=False)
-            else:
-                sel_inds = inds
-            for bn in data.branch_names:
-                samples_input.append(utils.to_numpy(samples_dict[bn][sel_inds]))
-                if bn in labels_dict:
-                    labels_input.append(np.asarray(labels_dict[bn][sel_inds]))
+    if sig_names_:
+        draw_ctx_fn = f"{model_or_submodel}_draw_ctxs.npy"
+        if save_or_not(draw_ctx_fn):
+            # prepare draws for each models
+            draw_ctx = {}
+            for sig_name, inds in zip(sig_names_, model_inds_, strict=True):
+                samples_input, labels_input = [], []
+                if inds.size > ndraws:
+                    sel_inds = rng.choice(inds, size=ndraws, replace=False)
                 else:
-                    labels_input.append(None)
-            z_02_factor_draws = utils.to_numpy(z_02_factor[sel_inds])
-            R02_tot_draws = utils.to_numpy(R02_tot[sel_inds])
-            R02_labelled_draws = utils.to_numpy(R02s_by_label[sel_inds])
+                    sel_inds = inds
+                for bn in data.branch_names:
+                    samples_input.append(utils.to_numpy(samples_dict[bn][sel_inds]))
+                    if bn in labels_dict:
+                        labels_input.append(np.asarray(labels_dict[bn][sel_inds]))
+                    else:
+                        labels_input.append(None)
+                R02_tot_draws = utils.to_numpy(R02_tot[sel_inds])
+                R02_labelled_draws = utils.to_numpy(R02s_by_label[sel_inds])
 
-            draw_ctx[sig_name] = {
-                "sel_inds": sel_inds,
-                "samples_input": samples_input,
-                "labels_input": labels_input,
-                "z_02_factor_draws": z_02_factor_draws,
-                "R02_labelled_draws": R02_labelled_draws,
-                "R02_tot_draws": R02_tot_draws,
-            }
-        # save
-        np.save(os.path.join(datapath, draw_ctx_fn), draw_ctx, allow_pickle=True)
-        print(f"Saved {draw_ctx_fn}")
-        draw_ctxs[model_or_submodel] = draw_ctx
-    else:
-        print(f"Loading {draw_ctx_fn}")
-        draw_ctxs[model_or_submodel] = np.load(
-            os.path.join(datapath, draw_ctx_fn), allow_pickle=True
-        ).item()
+                draw_ctx[sig_name] = {
+                    "sel_inds": sel_inds,
+                    "samples_input": samples_input,
+                    "labels_input": labels_input,
+                    "R02_labelled_draws": R02_labelled_draws,
+                    "R02_tot_draws": R02_tot_draws,
+                }
+            # save
+            np.save(os.path.join(datapath, draw_ctx_fn), draw_ctx, allow_pickle=True)
+            print(f"Saved {draw_ctx_fn}")
+            draw_ctxs[model_or_submodel] = draw_ctx
+        else:
+            print(f"Loading {draw_ctx_fn}")
+            draw_ctxs[model_or_submodel] = np.load(
+                os.path.join(datapath, draw_ctx_fn), allow_pickle=True
+            ).item()
 
 # construct grid for evaluating data
 ngrid = 256
@@ -1295,17 +1342,6 @@ data_grid = {
     "chi_eff": np.linspace(-1, 1, ngrid),
     "redshift": np.linspace(0, 1.5, ngrid),
 }
-
-
-def _leaf_rates_z02(samples_leaf, z_02_factor_draws):
-    """Convert per-leaf rates to z=0.2 rates (NumPy), masking invalid/negative."""
-    r0 = utils.to_numpy(samples_leaf[..., -1])
-    r0 = np.nan_to_num(r0, nan=0.0, posinf=0.0, neginf=0.0)
-    r0 = np.where(r0 > 0, r0, 0.0)
-    return r0 * z_02_factor_draws.reshape(
-        (-1,) + (1,) * (r0.ndim - 1)
-    )  # nsamples is the 0th dimension
-    # nsamples, ncomps
 
 
 def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
@@ -1331,9 +1367,10 @@ def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
     labels = draw_ctx["labels_input"][branch_idx]
 
     hyperparams = draw_ctx["samples_input"]
-    rate02 = _leaf_rates_z02(
-        hyperparams[branch_idx], draw_ctx["z_02_factor_draws"]
-    )  # (nsamples, ncomp)
+    if param_name == "redshift":
+        rate = _get_rates(branch_idx, hyperparams, z=0)  # rate at z=0
+    else:  # want to plot rate at z=0.2, consistent with LVK
+        rate = _get_rates(branch_idx, hyperparams, z=0.2)  # (nsamples, ncomp)
 
     leaf_pdf = utils.to_numpy(data.eval_param_marginals(x, branch_idx, param_name, hyperparams))
     leaf_pdf = np.nan_to_num(leaf_pdf, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1346,16 +1383,12 @@ def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
         )  # ncomps, nsamples, ngrid
         rate_by_label = np.zeros((ncomps, leaf_pdf.shape[0]), dtype=np.float64)
         for label in range(ncomps):  # label assigned by kmeans to each leaf
-            w = (rate02 * (labels == label)).astype(np.float64)
+            w = (rate * (labels == label)).astype(np.float64)
             rate_ppd_by_label[label] = np.sum(leaf_pdf * w[..., None], axis=1)
             rate_by_label[label] = np.sum(w, axis=1)
     else:
-        rate_by_label = np.swapaxes(rate02, 0, 1)
-        rate_ppd_by_label = np.swapaxes(leaf_pdf * rate02[..., None], 0, 1)
-
-    if param_name == "redshift":
-        # want rate at z=0.2
-        rate_ppd_by_label = rate_ppd_by_label * draw_ctx["z_02_factor_draws"][:, None]
+        rate_by_label = np.swapaxes(rate, 0, 1)
+        rate_ppd_by_label = np.swapaxes(leaf_pdf * rate[..., None], 0, 1)
 
     return rate_ppd_by_label, rate_by_label
     # output shapes: (ncomps, nsamples, ngrid), (ncomps, nsamples), (ngrid)
@@ -1409,8 +1442,6 @@ def plot_model_ppd(
 
     # sort by bf
     sig_names = list(model_draw_ctxs.keys())
-    if 0 in sig_names:
-        bfs.append(-1)  # put combined model last; sig_names already includes sig_names[-1] = 0
     bfs, sig_names = utils.sort_lists(bfs, sig_names, strict=False, reverse=True)
 
     nplot = min(len(sig_names), max_plot)  # at most max_plot panels
@@ -1474,11 +1505,8 @@ def plot_model_ppd(
 
                 # each ppd is (nsamples, ngrid)
                 for label_idx, ppd in enumerate(branch_rate_ppd_by_label):
-                    if len(data.branch_names) > 2:  # legend not needed if only 1 local branch
-                        comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
-                        legend_label = plot.textsc_ify(comp_label)
-                    else:
-                        legend_label = None
+                    comp_label = comp_labels[comp_label_sigs.index((branch_name, label_idx))]
+                    legend_label = plot.textsc_ify(comp_label)
                     color = palette[label_idx] if use_labels else color_tot
 
                     plot.plot_ppds(ax_comp, x, ppd, CI=None, color=color, label=legend_label)
@@ -1597,17 +1625,16 @@ def plot_model_ppd(
     return dict_out
 
 
-best_sig_name = sig_names[best_model_idx]
 ppds_fn = "ppds.npy"
-submodel_ppds_fn = f"ppds_{utils.get_safe_fn(best_sig_name)}.npy"
+submodel_ppds_fn = "ppds_submodels.npy"
 if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
-    ppds_dict = {}
+    model_ppds_dict = {}
     submodel_ppds_dict = {}
     if rj_branches:
-        ppds_dict["rj_branches"] = np.array(rj_branches, dtype=str)
-        ppds_dict["model_sigs"] = sig_names
-        ppds_dict["bayes_factors"] = bayes_factors
-        ppds_dict["comp_labels"] = {
+        model_ppds_dict["rj_branches"] = np.array(rj_branches, dtype=str)
+        model_ppds_dict["model_sigs"] = sig_names
+        model_ppds_dict["bayes_factors"] = bayes_factors
+        model_ppds_dict["comp_labels"] = {
             "comp_names": comp_labels,
             "comp_sigs": comp_label_sigs,
             "colors": component_palette,
@@ -1620,12 +1647,12 @@ if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
         "redshift",
         "mass_ratio",
     ]:
-        ppds_dict[f"{param_name}"] = plot_model_ppd(param_name, use_labels=False)
+        model_ppds_dict[f"{param_name}"] = plot_model_ppd(param_name, use_labels=False)
         # don't need to plot unlabelled twice
         for b_idx, bn in enumerate(data.branch_names[:-1]):
             if data.nleaves_max_dict[bn] > 1:
                 if data.get_parent_param(b_idx, param_name) in data.hp_ordering[b_idx]:  # local
-                    ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
+                    model_ppds_dict[f"{param_name}_labelled"] = plot_model_ppd(
                         param_name, use_labels=True
                     )
                     if bn in rj_branches:
@@ -1634,37 +1661,53 @@ if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
                         )
                     break
 
-    np.save(os.path.join(datapath, ppds_fn), ppds_dict, allow_pickle=True)
+    np.save(os.path.join(datapath, ppds_fn), model_ppds_dict, allow_pickle=True)
     print(f"Saved {ppds_fn}")
-    np.save(os.path.join(datapath, submodel_ppds_fn), submodel_ppds_dict, allow_pickle=True)
-    print(f"Saved {submodel_ppds_fn}")
+    if submodel_ppds_dict:
+        np.save(os.path.join(datapath, submodel_ppds_fn), submodel_ppds_dict, allow_pickle=True)
+        print(f"Saved {submodel_ppds_fn}")
+        plot_submodels = True
 else:
     print(f"Loading in ppds from {ppds_fn}")
-    ppds_dict = np.load(os.path.join(datapath, ppds_fn), allow_pickle=True).item()
-
-model_draw_ctxs = draw_ctxs["model"]
-# only want to plot model (not submodels) for contours
+    model_ppds_dict = np.load(os.path.join(datapath, ppds_fn), allow_pickle=True).item()
+    if os.path.exists(os.path.join(datapath, submodel_ppds_fn)) and "submodel" in draw_ctxs:
+        plot_submodels = True
+        submodel_ppds_dict = np.load(
+            os.path.join(datapath, submodel_ppds_fn), allow_pickle=True
+        ).item()
+    else:
+        plot_submodels = False
 
 # finally, plot 2D!!
 
 
-def _extract_marg_ppd(x_param, model_sig, comp_label=None):
+def _extract_marg_ppd(x_param, model_sig, comp_label=None, plot_submodels=False):
 
-    if "ppd" in ppds_dict[x_param]:  # x is a global parameter
-        return ppds_dict[x_param]["ppd"]
+    if plot_submodels:
+        ppds_dict = submodel_ppds_dict
+    else:
+        ppds_dict = model_ppds_dict
+
+    if "ppd" in model_ppds_dict[x_param]:  # x is a global parameter
+        return model_ppds_dict[x_param]["ppd"]
     else:
         if comp_label is None:
-            return np.sum(ppds_dict[x_param][model_sig], axis=0)
+            return np.sum(model_ppds_dict[x_param][model_sig], axis=0)
         elif comp_label in ppds_dict[f"{x_param}_labelled"][model_sig]:
             return ppds_dict[f"{x_param}_labelled"][model_sig][comp_label]
         else:
             raise ValueError(f"Unrecognized component label {comp_label}")
 
 
-def _compute_mass_ppds(x_param, y_param, model_sig=0):
+def _compute_mass_ppds(x_param, y_param, model_sig=0, plot_submodels=False):
 
-    xx = ppds_dict[x_param]["x"]
-    yy = ppds_dict[y_param]["x"]
+    if plot_submodels:
+        model_draw_ctxs = draw_ctxs["submodel"]
+    else:
+        model_draw_ctxs = draw_ctxs["model"]
+
+    xx = model_ppds_dict[x_param]["x"]
+    yy = model_ppds_dict[y_param]["x"]
 
     hyperparams = model_draw_ctxs[model_sig]["samples_input"]
 
@@ -1681,10 +1724,7 @@ def _compute_mass_ppds(x_param, y_param, model_sig=0):
 
     mass_ppds = {}
     for branch_idx, bn in enumerate(data.branch_names[:-1]):
-        branch_R02 = (
-            hyperparams[branch_idx][..., -1]
-            * model_draw_ctxs[model_sig]["z_02_factor_draws"][:, None]
-        )  # (nsamples, ncomps)
+        branch_R02 = _get_rates(branch_idx, hyperparams)  # (nsamples, ncomps)
         if "mass" in data.hp_ordering[branch_idx]:
             if "model" in data.hp_ordering[branch_idx]["mass"]:  # primary model
                 branch_xy_ppd = (
@@ -1714,25 +1754,44 @@ def _plot_param_2D_contours_and_marginals(
     savefig=None,
     mass_ppds=None,
     return_pxy_mean=False,
+    plot_submodels=False,
     **contour_kwargs,
 ):
-    assert model_sig in ppds_dict["model_sigs"], (
-        f"model_name must be one of {ppds_dict['model_sigs']}"
-    )
-    assert x_param in ppds_dict
-    assert y_param in ppds_dict
 
-    x_global = "ppd" in ppds_dict[x_param]
-    y_global = "ppd" in ppds_dict[y_param]
+    if plot_submodels:
+        ppds_dict = submodel_ppds_dict
+        model_draw_ctxs = draw_ctxs["submodel"]
+    else:
+        ppds_dict = model_ppds_dict
+        model_draw_ctxs = draw_ctxs["model"]
+
+    if not plot_submodels:
+        if rj_branches:
+            assert model_sig in ppds_dict["model_sigs"], (
+                f"model_name must be one of {ppds_dict['model_sigs']}"
+            )
+        else:
+            assert model_sig == 0
+    assert x_param in model_ppds_dict
+    assert y_param in model_ppds_dict
+
+    x_global = "ppd" in model_ppds_dict[x_param]
+    y_global = "ppd" in model_ppds_dict[y_param]
 
     draw_ctx = model_draw_ctxs[model_sig]
-    comp_labels = ppds_dict["comp_labels"]["comp_names"]
+    if rj_branches:
+        comp_labels = model_ppds_dict["comp_labels"]["comp_names"]
+    else:
+        comp_labels = data.branch_names[:-1]
     comp_rates = draw_ctx["R02_labelled_draws"].T  # (nsamples, ncomps) -> (ncomps, nsamples)
     model_sig_safe = utils.get_safe_fn(model_sig)  # for saving plots
+    if plot_submodels:
+        if model_sig in draw_ctxs["submodel"].keys():
+            model_sig_safe += "_submodel"
 
     if x_param.startswith("mass") and y_param.startswith("mass") and mass_ppds is None:
         # pre-compute mass ppds to save time in recursive calls
-        mass_ppds = _compute_mass_ppds(x_param, y_param, model_sig)
+        mass_ppds = _compute_mass_ppds(x_param, y_param, model_sig, plot_submodels=plot_submodels)
 
     if (comp_label == "all") and not (x_global and y_global):  # plot all together, in one plot
         # this is just a recursive call
@@ -1750,7 +1809,7 @@ def _plot_param_2D_contours_and_marginals(
             colors = color[:ncomps]
         else:
             # get color palette from ppds_dict
-            colors = ppds_dict["comp_labels"]["colors"]
+            colors = model_ppds_dict["comp_labels"]["colors"]
 
         bad_idx = []
         p_xy_mean_tot = 0.0
@@ -1767,6 +1826,7 @@ def _plot_param_2D_contours_and_marginals(
                 comp_label=comp_label,
                 mass_ppds=mass_ppds,
                 return_pxy_mean=True,
+                plot_submodels=plot_submodels,
                 **contour_kwargs,
             )
             p_xy_mean_tot = p_xy_mean_tot + p_xy_mean
@@ -1795,12 +1855,12 @@ def _plot_param_2D_contours_and_marginals(
         return axes
 
     # want to plot marginals on the side
-    p_x_marg = _extract_marg_ppd(x_param, model_sig, comp_label)
-    p_y_marg = _extract_marg_ppd(y_param, model_sig, comp_label)
+    p_x_marg = _extract_marg_ppd(x_param, model_sig, comp_label, plot_submodels=plot_submodels)
+    p_y_marg = _extract_marg_ppd(y_param, model_sig, comp_label, plot_submodels=plot_submodels)
 
     # get x/y grid from dict
-    xx = ppds_dict[x_param]["x"]
-    yy = ppds_dict[y_param]["x"]
+    xx = model_ppds_dict[x_param]["x"]
+    yy = model_ppds_dict[y_param]["x"]
 
     if x_param.startswith("mass") and y_param.startswith("mass"):
         if comp_label is None:  # just want total
@@ -1810,16 +1870,20 @@ def _plot_param_2D_contours_and_marginals(
             p_xy = np.sum(np.stack(p_xy), axis=0)  # add branches together
         else:  # have to extract component from labels
             comp_idx = comp_labels.index(comp_label)
-            bn, b_label_idx = ppds_dict["comp_labels"]["comp_sigs"][comp_idx]
+            bn, b_label_idx = model_ppds_dict["comp_labels"]["comp_sigs"][comp_idx]
             labels = draw_ctx["labels_input"][data.branch_names.index(bn)]
             mask = (labels == b_label_idx)[..., None, None]
             p_xy = np.nansum(mass_ppds[bn] * mask, axis=1)
     else:
-        if (comp_label is None) and not (x_global and y_global):
+        if (comp_label is None) and not (x_global and y_global) and rj_branches:
             p_xy = 0.0
             for comp_label_, comp_rate in zip(comp_labels, comp_rates, strict=True):
-                comp_x_ppd = _extract_marg_ppd(x_param, model_sig, comp_label_)
-                comp_y_ppd = _extract_marg_ppd(y_param, model_sig, comp_label_)
+                comp_x_ppd = _extract_marg_ppd(
+                    x_param, model_sig, comp_label_, plot_submodels=plot_submodels
+                )
+                comp_y_ppd = _extract_marg_ppd(
+                    y_param, model_sig, comp_label_, plot_submodels=plot_submodels
+                )
                 comp_xy_ppd = np.where(
                     comp_rate[:, None, None] > 0,
                     np.expand_dims(comp_x_ppd, 2)
@@ -1854,16 +1918,20 @@ def _plot_param_2D_contours_and_marginals(
         )
 
         # plot m1m2 triangle if needed
-        if len(axes[1].patches) == 0:  # no triangle yet
+        ax_joint = axes[1]
+        if len(ax_joint.patches) == 0:  # no triangle yet
             if x_param == "mass_1_source" and y_param == "mass_2_source":
-                axes[1] = plot.shade_triangle(axes[1])
+                ax_joint = plot.shade_triangle(ax_joint)
             elif x_param == "mass_2_source" and y_param == "mass_1_source":
-                axes[1] = [plot.shade_triangle(axes[1], plane="lower half")]
+                ax_joint = plot.shade_triangle(ax_joint, plane="lower half")
 
     if savefig:
         if not isinstance(savefig, str):
-            suffix = "tot" if comp_label is None else utils.get_safe_fn(comp_label)
-            savefig = f"contours2d_{x_param}_{y_param}_{model_sig_safe}_{suffix}.pdf"
+            fn_parts = ["contours2d", x_param, y_param]
+            if model_sig:
+                fn_parts.append(model_sig_safe)
+            fn_parts.append("tot" if comp_label is None else utils.get_safe_fn(comp_label))
+            savefig = "_".join(fn_parts) + ".pdf"
         axes[0].savefig(os.path.join(figpath, savefig))
         print(f"Saved {savefig}")
 
@@ -1878,15 +1946,20 @@ for param_x, param_y in [
     ("mass_ratio", "chi_eff"),
     ("mass_1_source", "chi_eff"),
     ("mass_1_source", "mass_ratio"),
-    ("mass_1_source", "mass_2_source"),
+    ("mass_2_source", "mass_1_source"),
+    ("redshift", "mass_1_source"),
+    ("redshift", "chi_eff"),
 ]:
+    if "ppd" in model_ppds_dict[param_x] or "ppd" in model_ppds_dict[param_y]:
+        # global parameter - no need to plot contours
+        continue
     x_param_ylog = False if param_x == "chi_eff" else True
     y_param_ylog = False if param_y == "chi_eff" else True
     if save_or_not(f"contours2d_{param_x}_{param_y}*_tot.pdf"):
         _plot_param_2D_contours_and_marginals(  # total
             param_x,
             param_y,
-            model_sig=best_sig_name,
+            model_sig=0,
             savefig=True,
             x_param_ylog=x_param_ylog,
             y_param_ylog=y_param_ylog,
@@ -1896,18 +1969,37 @@ for param_x, param_y in [
             CI=90,
         )
     if save_or_not(f"contours2d_{param_x}_{param_y}*_labelled.pdf"):
-        _plot_param_2D_contours_and_marginals(  # all individually
-            param_x,
-            param_y,
-            model_sig=best_sig_name,
-            savefig=True,
-            x_param_ylog=x_param_ylog,
-            y_param_ylog=y_param_ylog,
-            levels=(0.5, 0.9),
-            color=component_palette,
-            comp_label="all",
-            CI=None,
-        )
+        for sig_name, bf in zip(sig_names, bayes_factors, strict=False):
+            if bf > 0.5:
+                _plot_param_2D_contours_and_marginals(  # all individually
+                    param_x,
+                    param_y,
+                    model_sig=sig_name,
+                    savefig=True,
+                    x_param_ylog=x_param_ylog,
+                    y_param_ylog=y_param_ylog,
+                    levels=(0.5, 0.9),
+                    color=component_palette,
+                    comp_label="all",
+                    CI=None,
+                )
+    if plot_submodels:
+        if save_or_not(f"contours2d_{param_x}_{param_y}*_submodel_labelled.pdf"):
+            for sig_name, bf in zip(submodel_names, submodel_bfs, strict=True):
+                if bf > 0.5:
+                    _plot_param_2D_contours_and_marginals(  # all individually
+                        param_x,
+                        param_y,
+                        model_sig=sig_name,
+                        savefig=True,
+                        x_param_ylog=x_param_ylog,
+                        y_param_ylog=y_param_ylog,
+                        levels=(0.5, 0.9),
+                        color=component_palette,
+                        comp_label="all",
+                        CI=None,
+                        plot_submodels=True,
+                    )
 
 R02_low, R02_med, R02_high = np.percentile(R02_tot, [5, 50, 95])
 utils.print_to(

@@ -300,7 +300,6 @@ class jf_skew_t(trunc_dist):
     def _reparam_and_shift(logalpha, logkappa):
         a, b = jf_skew_t._reparam(logalpha, logkappa)
         mode = (a - b) * xp.sqrt(a + b) / xp.sqrt((2 * a + 1) * (2 * b + 1))
-        # x_ = x + mode # shift by mode
 
         return a, b, mode
 
@@ -310,6 +309,7 @@ class jf_skew_t(trunc_dist):
 
         c = 2 ** (a + b - 1) * special.beta(a, b) * xp.sqrt(a + b)
         u = (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)
+
         result = (1 + u) ** (a + 0.5) * (1 - u) ** (b + 0.5) / c
         # Guard against NaN from 0/0 or inf/inf when c is degenerate
         return xp.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -782,7 +782,7 @@ class LVK_Plancktaper_powerlaw(dist):
         return logpdf_unnorm - xp.log(norm)
 
 
-_mm = xp.linspace(2, 100, 512)
+_mm = xp.linspace(2, 300, 1024)
 _dm = _mm[1] - _mm[0]
 
 
@@ -816,7 +816,8 @@ class m1_q_model(MassModel):
 
     params = ("mass_1_source", "mass_ratio")
 
-    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
+    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
+        mass_ratio_kwargs = mass_ratio_kwargs.copy()
         if "xmax" not in mass_ratio_kwargs:
             mass_ratio_kwargs["xmax"] = 1.0
         return self.q_model.pdf(
@@ -825,7 +826,7 @@ class m1_q_model(MassModel):
             **mass_ratio_kwargs,
         )
 
-    def _p_q(self, q, mass_1_source_kwargs, mass_ratio_kwargs):
+    def _p_q(self, q, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
         qq, mm1 = xp.meshgrid(q, _mm, indexing="ij", copy=False)
         data_flat = {"mass_ratio": qq.ravel(), "mass_1_source": mm1.ravel()}
 
@@ -833,12 +834,13 @@ class m1_q_model(MassModel):
             data_flat,
             mass_1_source_kwargs=mass_1_source_kwargs,
             mass_ratio_kwargs=mass_ratio_kwargs,
+            **kwargs,
         )
         p_m_q = p_m_q.reshape(p_m_q.shape[:-1] + (len(q), len(_mm)))
 
         return xp.sum(p_m_q, axis=-1) * _dm
 
-    def _p_m2(self, m2, mass_1_source_kwargs, mass_ratio_kwargs):
+    def _p_m2(self, m2, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
         mm2, mm1 = xp.meshgrid(m2, _mm, indexing="ij")
         qq = mm2 / mm1
         data_flat = {"mass_ratio": qq.ravel(), "mass_1_source": mm1.ravel()}
@@ -847,31 +849,48 @@ class m1_q_model(MassModel):
             data_flat,
             mass_1_source_kwargs=mass_1_source_kwargs,
             mass_ratio_kwargs=mass_ratio_kwargs,
+            **kwargs,
         )
         p_m1_m2 = p_m_q.reshape(p_m_q.shape[:-1] + (len(m2), len(_mm))) / _mm
         return xp.sum(p_m1_m2, axis=-1) * _dm
 
-    def get_marginal_pdf(self, param_vals, param, mass_1_source_kwargs, mass_ratio_kwargs):
+    def get_marginal_pdf(
+        self, param_vals, param, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs
+    ):
         if param == "mass_1_source":
             return self.m1_model.pdf(param_vals, **mass_1_source_kwargs)
         elif param == "mass_ratio":
-            return self._p_q(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
+            return self._p_q(param_vals, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs)
         elif param == "mass_2_source":
-            return self._p_m2(param_vals, mass_1_source_kwargs, mass_ratio_kwargs)
+            return self._p_m2(param_vals, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs)
         else:
             raise ValueError(f"Unknown parameter {param}")
 
-    def pdf(self, data, mass_1_source_kwargs, mass_ratio_kwargs):
+    def pdf(self, data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
         return self.m1_model.pdf(
             data["mass_1_source"], **mass_1_source_kwargs
-        ) * self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs)
+        ) * self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs)
 
-    def moments(self, mass_1_source_kwargs, mass_ratio_kwargs):
+    def moments(self, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
+        mass_ratio_kwargs = mass_ratio_kwargs.copy()
         mass_ratio_kwargs["xmin"] = 0.0
         mass_ratio_kwargs["xmax"] = 1.0
         m1_mu, m1_std = self.m1_model.moments(**mass_1_source_kwargs)
         q_mu, q_std = self.q_model.moments(**mass_ratio_kwargs)
         return {"mass_1_source": (m1_mu, m1_std), "mass_ratio": (q_mu, q_std)}
+
+
+class m1_q_m2max_model(m1_q_model):
+    def _p_q_given_m1(self, data, mass_1_source_kwargs, mass_ratio_kwargs, m2max):
+        mass_ratio_kwargs = mass_ratio_kwargs.copy()
+        mass_ratio_kwargs["xmax"] = xp.minimum(
+            mass_ratio_kwargs.get("xmax", 1.0), m2max / data["mass_1_source"]
+        )
+        return self.q_model.pdf(
+            data["mass_ratio"],
+            xmin=mass_1_source_kwargs["xmin"] / data["mass_1_source"],
+            **mass_ratio_kwargs,
+        )
 
 
 # class Mc_q_model(MassModel):
@@ -922,7 +941,7 @@ class gaussian_copula_mass_model(MassModel):
 
     params = ("mass_1_source", "mass_2_source")
 
-    _zz = xp.linspace(-5, 5, 256)
+    _zz = xp.linspace(-5, 5, 512)
     _dz = _zz[1] - _zz[0]
 
     def _compute_norm(self, rho, mass_1_source_kwargs, mass_2_source_kwargs):
@@ -1040,15 +1059,17 @@ class sym_gaussian_copula_mass_model(MassModel):
 
         jacobian = m1  # P(m1, m2) -> P(m1, q)
 
-        res = (
-            self._p_m1(m1, rho, mass_1_source_kwargs)
-            * self._p_m2(m2, rho, mass_1_source_kwargs)
-            * gaussian_copula(u, v, rho)
-            * 2
-            * jacobian
-            * _check_gaussian_copula_params(m1, m2, rho)
-        )
+        factor = xp.sqrt((1.0 - rho) / (1.0 + rho))
+        z1 = special.ndtri(u)
+        z2 = special.ndtri(v)
 
+        p_m1 = 2 * self.m_model.pdf(m1, **mass_1_source_kwargs) * special.ndtr(factor * z1)
+        p_m2 = 2 * self.m_model.pdf(m2, **mass_1_source_kwargs) * special.ndtr(-factor * z2)
+        copula_vals = xp.exp(
+            (2 * rho * z1 * z2 - rho**2 * (z1**2 + z2**2)) / (2 * (1.0 - rho**2))
+        ) / xp.sqrt(1.0 - rho**2)
+
+        res = p_m1 * p_m2 * copula_vals * 2 * jacobian * _check_gaussian_copula_params(m1, m2, rho)
         return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
 
     def _p_m1(self, m1, rho, mass_1_source_kwargs):
@@ -1154,6 +1175,11 @@ class PL_rate(BaseRate):
     @staticmethod
     def log_psi(z, gamma):
         return gamma * xp.log1p(z)
+
+    @staticmethod
+    def moments(gamma):
+        # Just use the power law exponent to differentiate models
+        return gamma, xp.zeros_like(gamma)
 
 
 class MD_rate(BaseRate):
