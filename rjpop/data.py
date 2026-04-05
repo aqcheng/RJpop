@@ -1,7 +1,9 @@
 from typing import Literal
 
 import numpy as np
+import pdfs
 import utils
+from eryn.prior import ProbDistContainer, log_uniform, uniform_dist
 from scipy.stats import gaussian_kde
 from sklearn.cluster import KMeans
 from xp import INF, scatter_add, xp
@@ -18,6 +20,177 @@ nleaves_max_dict = {}
 branch_names = []
 branch_dims = []
 RNG_SEED = 0
+
+params = set()
+branch_priordicts = []
+
+# pre-processing
+
+
+# construct list of dictionaries `hp_ordering` with the primary models belonging to each branch - this will be used in logl function
+# note that models whose primary model are local could also have global parameters (hence branch_id list)
+# [ {param: {  __model___: name of model (e.g. skew_t, gaussian),
+#          model_hp_names: [hp_name1, hp_name2, ...],
+#          latex_hp_names: [hp_latex1, hp_latex2, ...],
+#                 col_idx: (param_idx1, param_idx2) }]            i.e. which column in data array in the branch the hyperparameter is found
+def _process_param_hp_priors(
+    param,
+    input_param_priordict,
+    branch_idx,
+    output_branch_infodict,  # outputs
+    hp_idx_start=0,
+):
+
+    if param == "mass_2_source":
+        param_get = "mass_1_source"  # same models
+    else:
+        param_get = param
+
+    output_branch_infodict[param] = {"model_hp_names": [], "col_idx": []}
+    if "__model__" in input_param_priordict:
+        model_name = input_param_priordict.pop("__model__")
+        model = pdfs.MODELS[param_get][model_name]["model"]
+        hps_fix = pdfs.MODELS[param_get][model_name].get("params_fix", {}).copy()
+
+        output_branch_infodict[param].update(
+            {
+                "model_name": model_name,
+                "model": model,
+            }
+        )
+
+        if hasattr(model, "params"):
+            params.update(model.params)
+
+    else:
+        # this should only be if the model was specified in a local branch
+        assert branch_idx in [-1, len(branch_names) - 1], (
+            "param must be global if no model specified"
+        )
+        assert param in params, "param must be evaluated in a local branch if no model specified"
+        hps_fix = {}
+        model_name = None
+
+    hp_idx = hp_idx_start
+    params.add(param)
+
+    # update infodict + priordict
+    for hp, hp_range in input_param_priordict.items():
+        if hp in hps_fix:
+            hps_fix.pop(hp)  # overwrite
+
+        if isinstance(hp_range, list) or isinstance(hp_range, tuple):
+            if len(hp_range) > 2 and hp_range[-1] == "log":
+                branch_priordicts[branch_idx][hp_idx] = log_uniform(hp_range[0], hp_range[1])
+            else:
+                branch_priordicts[branch_idx][hp_idx] = uniform_dist(hp_range[0], hp_range[1])
+
+            # update infodict
+            output_branch_infodict[param]["model_hp_names"].append(hp)
+            output_branch_infodict[param]["col_idx"].append(hp_idx)
+
+            try:
+                hp_ordering[branch_idx]["__latex__"].append(
+                    pdfs.MODELS[param_get][model_name]["param_latex"][hp]
+                )
+            except KeyError:
+                hp_ordering[branch_idx]["__latex__"].append(
+                    pdfs.MODELS[param_get]["param_latex"].get(hp, hp)
+                )
+
+            hp_idx += 1
+
+        elif isinstance(hp_range, float) or isinstance(hp_range, int):
+            hps_fix[hp] = hp_range
+
+        elif isinstance(hp_range, dict):  # hp_range is a subdictionary for another parameter hp
+            # the use case for this is for joint (m1, m2) or (m1, q) evaluation
+            if param != "mass" or not hp.startswith("mass"):
+                raise ValueError("Joint evaluation only currently supported for mass")
+
+            if "subparams" in output_branch_infodict[param]:
+                output_branch_infodict[param]["subparams"].append(hp)
+            else:
+                output_branch_infodict[param]["subparams"] = [hp]
+
+            hp_idx = _process_param_hp_priors(  # hierarchical branch infodict
+                hp,
+                hp_range,
+                branch_idx,
+                output_branch_infodict=output_branch_infodict[param],
+                hp_idx_start=hp_idx,
+            )
+
+        else:
+            raise ValueError(f"Invalid prior range for {param} {hp}: {hp_range}")
+
+    output_branch_infodict[param]["params_fix"] = hps_fix
+    if "subparams" in output_branch_infodict[param]:
+        # instantiate joint model
+        submodels = {
+            f"{subparam}_model": output_branch_infodict[param][subparam]["model"]
+            for subparam in output_branch_infodict[param]["subparams"]
+        }
+        output_branch_infodict[param]["model"] = model(**submodels)
+
+    return hp_idx
+
+
+def process_input_priordict(input_priordicts, rate_prior=(0.05, 100)):
+    priors = {}  # {branch_name: ProbDistContainer({i: prior})}
+    covs_all = []  # covariance matrices for gibbs sampling of the leaf
+
+    global hp_ordering
+    global branch_names
+    global branch_priordicts
+    global branch_dims
+    global nleaves_min_dict
+    global nleaves_max_dict
+
+    branch_names = [d["__branch__"] for d in input_priordicts]
+    hp_ordering = [{} for _ in branch_names]
+    branch_priordicts = [{} for _ in branch_names]
+
+    for branch_idx, input_dict in enumerate(input_priordicts):
+        branch_name = input_dict.pop("__branch__")
+        nleaves_min_dict[branch_name], nleaves_max_dict[branch_name] = input_dict.pop(
+            "__ncomp__", [1, 1]
+        )
+        covs_all.append(np.asarray(input_dict.pop("__factor__", 0.005)))
+
+        hp_idx = 0
+        hp_ordering[branch_idx]["__latex__"] = []
+
+        for param, input_param_priordict in input_dict.items():
+            if param.startswith("__") or param.endswith("__"):  # ignore special / metainfo keys
+                continue
+
+            hp_idx = _process_param_hp_priors(
+                param,
+                input_param_priordict,
+                branch_idx,
+                output_branch_infodict=hp_ordering[branch_idx],
+                hp_idx_start=hp_idx,
+            )
+
+        if branch_name != "global":
+            #  add R0 for each local branch
+            branch_priordicts[branch_idx][hp_idx] = uniform_dist(*rate_prior)
+            hp_ordering[branch_idx]["__latex__"].append("$R_0$")
+            hp_idx += 1
+
+        # each local branch will have the number of parameters specified in the prior file + 1 (R0)
+
+        priors[branch_name] = ProbDistContainer(branch_priordicts[branch_idx])
+        branch_dims.append(hp_idx)
+
+        if covs_all[-1].size < hp_idx - 1:
+            print(
+                f"WARNING: covariance diagonal size is too small. The last {covs_all[-1].size - hp_idx + 1} parameters will default to Gaussian step size 1."
+            )
+
+    return priors, covs_all
+
 
 # ---------------------------
 # Likelihood helper functions
@@ -75,7 +248,7 @@ def unpack_hp_vals(branch_idx, param, hyperparams, branch_groups=None, param_dic
         Branch index into `hp_ordering` / `branch_names` for the *target* model.
         Use `-1` for the global branch.
     param : str
-        Name of the parameter being evaluated (key into `utils.MODELS` and
+        Name of the parameter being evaluated (key into `pdfs.MODELS` and
         `hp_ordering[branch_idx]`).
     hyperparams : list
         List of per-branch hyperparameter arrays. Must have length
@@ -173,10 +346,10 @@ def unpack_hp_vals(branch_idx, param, hyperparams, branch_groups=None, param_dic
     return model_hp_vals_dict
 
 
-def eval_param_model(data_flat, branch_idx, param, hyperparams, branch_groups=None):
+def eval_param_model(data_flat, branch_idx, param, hyperparams, branch_groups=None, pad=True):
     """Convenience wrapper: unpack hyperparameters then evaluate the model pdf."""
     model_hp_vals_dict = unpack_hp_vals(branch_idx, param, hyperparams, branch_groups)
-    return model_func_wrapper(branch_idx, param, model_hp_vals_dict, data_flat)
+    return model_func_wrapper(branch_idx, param, model_hp_vals_dict, data_flat, pad=pad)
 
 
 def eval_param_moments(branch_idx, param, hyperparams, branch_groups=None):
@@ -192,14 +365,16 @@ def eval_param_marginals(x_arr, branch_idx, param, hyperparams):
     """
 
     x = xp.asarray(x_arr)  # numpy input ok
+    pad = True if x.size > 1 else False
+
     if param in hp_ordering[branch_idx]:
         if param == "redshift":
-            model_hp_vals_dict = utils.recursive_pad(
-                unpack_hp_vals(branch_idx, param, hyperparams)
-            )
+            model_hp_vals_dict = unpack_hp_vals(branch_idx, param, hyperparams)
+            if pad:
+                model_hp_vals_dict = utils.recursive_pad(model_hp_vals_dict)
             return hp_ordering[branch_idx][param]["model"].psi(x, **model_hp_vals_dict)
 
-        return eval_param_model({param: x}, branch_idx, param, hyperparams)
+        return eval_param_model({param: x}, branch_idx, param, hyperparams, pad=pad)
 
     # else: get marginal from a joint parent model
     parent_param = get_parent_param(branch_idx, param)
@@ -208,16 +383,23 @@ def eval_param_marginals(x_arr, branch_idx, param, hyperparams):
     parent_model_hp_vals_dict = unpack_hp_vals(
         branch_idx, parent_param, hyperparams, param_dict=parent_param_dict
     )
-    parent_model_hp_vals_dict = utils.recursive_pad(parent_model_hp_vals_dict)
+    if pad:
+        parent_model_hp_vals_dict = utils.recursive_pad(parent_model_hp_vals_dict)
     parent_model = hp_ordering[branch_idx][parent_param]["model"]
     return parent_model.get_marginal_pdf(x, param, **parent_model_hp_vals_dict)
 
 
 def get_auto_scale(moments_dict):
     scales = {}
-    for p, (mu, sig) in moments_dict.items():
-        scales[p] = xp.sqrt(xp.nanvar(mu) + xp.nanvar(sig) + xp.nanmean(sig) ** 2)
+    for p, feats in moments_dict.items():
+        muvar = xp.nanvar(feats[0])
+        if len(feats) > 1:
+            stdvar, stdmed2 = xp.nanvar(feats[1]), xp.nanmedian(feats[1])**2
+        else:
+            stdvar, stdmed2 = muvar, 0 
+        scales[p] = xp.sqrt(muvar + stdvar + stdmed2)
     return scales
+
 
 def vectorize_moments_dict(moments_dict, rescale: Literal["auto", "manual", None] = None):
     """
@@ -228,21 +410,24 @@ def vectorize_moments_dict(moments_dict, rescale: Literal["auto", "manual", None
     if rescale == "auto":
         scales_dict = get_auto_scale(moments_dict)
     elif rescale == "manual":
-        scales_dict = utils.PARAM_SCALES
+        scales_dict = pdfs.PARAM_SCALES
     else:
         scales_dict = {}
-    for p, (mu, sig) in moments_dict.items():
+    for p, feats in moments_dict.items():
         scale = scales_dict.get(p, 1)
-        res.extend([mu / scale, sig / scale])
+        res.extend([feat / scale for feat in feats])
 
     return xp.stack(res, axis=-1).astype(xp.float32)
     # should be (nsamples, ncomp, dfeat) or (nleaves_tot, dfeat) if not grouped
 
 
-def compute_branch_moment_features(branch_idx, hps, branch_groups=None, autoscale=True):
+def compute_branch_moment_features(
+    branch_idx, hps, branch_groups=None, autoscale=True, include_rate=False
+):
     """
     Build a moment-based feature vector for a single RJMCMC leaf, scaled by the typical parameter
-    scales set in utils.PARAM_SCALES.
+    scales set in pdfs.PARAM_SCALES or whitened automatically (autoscale=True). Also returns the
+    whitening scale as an array with the same length as the # of features.
 
     Parameters
     ----------
@@ -261,51 +446,47 @@ def compute_branch_moment_features(branch_idx, hps, branch_groups=None, autoscal
     Notes
     -----
     The feature vector concatenates (mean, std) for each parameter in
-    `params_to_use`, each scaled by `utils.PARAM_SCALES[param]` so Euclidean distance is
+    `params_to_use`, each scaled by `pdfs.PARAM_SCALES[param]` so Euclidean distance is
     comparable across dimensions.
     """
 
     moments_dict = {}
     for p in utils.skip_dunder(hp_ordering[branch_idx].keys()):
         moments_dict.update(eval_param_moments(branch_idx, p, hps, branch_groups))
+    if include_rate:
+        z_bidx = branch_idx if "redshift" in hp_ordering[branch_idx] else -1
+        z02 = eval_param_marginals(0.2, z_bidx, "redshift", hps)
+        moments_dict["rate"] = [xp.asarray(hps[branch_idx][..., -1]) * z02]
 
     feats = vectorize_moments_dict(moments_dict, rescale="auto" if autoscale else "manual")
-    feat_scales = get_auto_scale(moments_dict) if autoscale else utils.PARAM_SCALES
+    feat_scales = get_auto_scale(moments_dict) if autoscale else pdfs.PARAM_SCALES
 
-    return feats, [float(i) for i in feat_scales.values()]
+    return feats, np.array([float(feat_scales[p]) for p, moments in moments_dict.items() for moment in moments])
 
-
-def label_samples_kmeans(
-    branch_idx, samples_loc, samples_global, ncomp, autoscale=False, rng_seed=0
-):
-    """Assign stable component labels via global KMeans on moment features.
-
-    This performs a *global* clustering over all active leaves across samples for
-    a given branch. Inactive leaves (NaN or rate<=0) are assigned label -1.
-
-    Returns
-    -------
-    labels : np.ndarray
-        Shape (nsamples, ncomp). Each entry is in [0, ncomp-1] for active
-        leaves, or -1 for inactive.
-    feats : np.ndarray
-        Shape (nsamples, nleaves_max, 2 * nparams).
-    scales : dict
-        Dictionary of parameter scales used to whiten the features.
-    """
-    nsamples, nleaves_max, _ = samples_loc.shape
-    active = utils.leaf_active_mask(samples_loc)
+def hp_list_from_dict(hp_dict):
 
     hps = [None] * len(branch_names)
-    hps[branch_idx] = xp.asarray(samples_loc)
-    hps[-1] = xp.asarray(samples_global)
+    for b_idx, bn in enumerate(branch_names):
+        if bn in hp_dict:
+            hps[b_idx] = hp_dict[bn]
 
-    feats, scales = compute_branch_moment_features(branch_idx, hps, autoscale=autoscale)
-    feats = utils.to_numpy(feats)
-    dfeats = feats.shape[-1]
+    return hps
+
+def hp_dict_from_list(hps):
+    return {branch_names[b_idx]: hps[b_idx] for b_idx in range(len(hps))}
+
+def label_kmeans(feats, active_mask, ncomp, rng_seed=0):
+
+    """
+    Calls sklearn's KMeans to assign ncomp labels based on features. The input features
+    are computed from reversible jump samples (shape (nsamples, nleaves_max, dfeats)), 
+    and so active_mask masks out the inactive leaves.
+    """
+
+    nsamples, nleaves_max, dfeats = feats.shape
 
     X = feats.reshape(-1, dfeats)
-    active_flat = active.reshape(-1)
+    active_flat = active_mask.reshape(-1)
     X_act = X[active_flat]
     if X_act.shape[0] < ncomp:
         raise ValueError("Too few active leaves to fit KMeans")
@@ -313,9 +494,8 @@ def label_samples_kmeans(
     km = KMeans(n_clusters=ncomp, random_state=rng_seed, n_init="auto")
     labels_act = km.fit_predict(X_act)
 
-    # order clusters by decreasing cluster size (number of assigned active points)
-    counts = np.bincount(labels_act, minlength=ncomp)
-    order = np.argsort(-counts, kind="stable")
+    # order clusters by the column -1 in feats (should be rate)
+    order = np.argsort(-km.cluster_centers_[:, -1], kind="stable")
     inv_order = np.empty_like(order)
     inv_order[order] = np.arange(ncomp)
     labels_act = inv_order[labels_act]
@@ -324,7 +504,41 @@ def label_samples_kmeans(
     labels_flat[active_flat] = labels_act.astype(np.int32)
     labels = labels_flat.reshape(nsamples, nleaves_max)
 
-    return labels, feats, scales
+    return labels, km.cluster_centers_[order]
+
+
+def label_branch_samples_kmeans(
+    branch_idx, samples_dict, ncomp, autoscale=False, rng_seed=0
+):
+    """
+    Computes features from samples and assigns ncomp component labels to branch branch_idx via 
+    KMeans for the given samples. Wraps label_kmeans function above.
+
+    Returns
+    -------
+    labels : np.ndarray
+        Shape (nsamples, ncomp). Each entry is in [0, ncomp-1] for active
+        leaves, or -1 for inactive.
+    feats : np.ndarray
+        Shape (nsamples, nleaves_max, nfeats) where nfeats is usually 2*nparams.
+        (Unwhitened) features of branch branch_idx computed from samples.
+    scales : np.ndarray
+        Shape (nfeats,). List of parameter scales used to whiten the features.
+    cluster_centers: np.ndarray
+        Shape (ncomp, nfeats). (Unwhitened) cluster centers.
+    """
+
+    hps = hp_list_from_dict(samples_dict)
+    active = utils.leaf_active_mask(hps[branch_idx])
+
+    feats, scales = compute_branch_moment_features(
+        branch_idx, hps, autoscale=autoscale, include_rate=True
+    )
+    feats = utils.to_numpy(feats)
+
+    labels, cluster_centers = label_kmeans(feats, active, ncomp, rng_seed=rng_seed)
+
+    return labels, feats * scales, cluster_centers * scales, scales
 
 
 def subpop_kdes_from_samples(samples):
@@ -357,10 +571,9 @@ def subpop_kdes_from_samples(samples):
         try:
             kde_dict[branch_name] = []
             weights_dict[branch_name] = []
-            labels_loc = label_samples_kmeans(
+            labels_loc = label_branch_samples_kmeans(
                 branch_idx=branch_idx,
-                samples_loc=samples_loc,
-                samples_global=samples_shaped["global"],
+                samples_dict=samples_shaped,
                 ncomp=nleaves_max,
                 rng_seed=RNG_SEED + branch_idx + 1,
             )[0]
@@ -669,3 +882,142 @@ def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
 
     return utils.to_numpy(xp.clip(logl, -INF, None))
     # output needs to be a numpy array
+
+# rate post-processing
+
+def param_branch_idx(branch_idx, param="redshift"):
+
+    # returns -1 for global branch if global parameter
+
+    if param not in hp_ordering[branch_idx]:
+        assert param in hp_ordering[-1], (
+            f"{param} not found in branch {branch_idx} or global branch"
+        )
+        branch_idx = -1
+    return branch_idx
+
+def filter_rates(arr):
+    return np.where(~np.isfinite(arr) | (arr < 0), 0.0, arr)
+
+def get_z_factor(samples, branch_idx=-1, z=0.2):
+    if z == 0:
+        return 1.0
+    if type(samples) is list:
+        samples = hp_dict_from_list(samples)
+    elif type(samples) is not dict:
+        raise ValueError(f"samples must be list or dict, not {type(samples)}")
+
+    branch_idx = param_branch_idx(branch_idx, "redshift")
+    redshift_param_dict = hp_ordering[branch_idx]["redshift"]
+    if isinstance(samples, dict):
+        branch_samples = samples[branch_names[branch_idx]]
+    else:  # list of hyperparameters
+        branch_samples = samples[branch_idx]
+    z_02_factor = redshift_param_dict["model"].psi(
+        z,
+        **{
+            hp: branch_samples[..., col_idx]
+            for hp, col_idx in zip(
+                redshift_param_dict["model_hp_names"],
+                redshift_param_dict["col_idx"],
+                strict=True,
+            )
+        },
+    )
+    return utils.to_numpy(z_02_factor)
+
+
+def get_rates(branch_idx, samples, z=0.2):
+    if isinstance(samples, dict):
+        samples = [utils.to_numpy(samples.get(bn, None)) for bn in branch_names]
+    if branch_idx == -1 or branch_idx == len(branch_names) - 1:
+        # global - add all branch rates together along ncomps axis
+        rate = np.nansum(
+            np.concatenate([(b_samples[..., -1]) for b_samples in samples[:-1]], axis=-1),
+            axis=-1,
+            keepdims=True,
+        )
+    else:
+        rate = samples[branch_idx][..., -1]
+    return filter_rates(rate * get_z_factor(samples, branch_idx, z=z))
+
+def aggregate_by_label(arr, labels, ncomps=None, comp_axis=1):
+    # aggregates array of samples by label, summing along comp_axis
+
+    res = []
+    if ncomps is None:
+        ncomps = np.nanmax(labels)+1
+    
+    arr = filter_rates(utils.to_numpy(arr))
+    for comp_idx in range(ncomps):
+        res.append(
+            np.sum(
+                arr * (comp_idx == labels),
+                axis=comp_axis,
+            )
+        )
+    
+    return np.stack(res, axis=comp_axis)
+
+def get_branch_Ntot(branch_idx, hps, labels=None, zmax=1.5):
+    if type(hps) is dict: 
+        hps = hp_list_from_dict(hps)
+    branch_idx = param_branch_idx(branch_idx, "redshift")
+    rate_model = hp_ordering[branch_idx]["redshift"]["model"]
+    rate_hp_dict = unpack_hp_vals(branch_idx, "redshift", hps)
+    R0 = xp.asarray(get_rates(branch_idx, hps, z=0))
+
+    Ntot = rate_model.Ntot(R0=R0, zmax=zmax, **rate_hp_dict)
+    if labels is None:
+        return Ntot
+    
+    Ntot = filter_rates(utils.to_numpy(Ntot))
+    # aggregate by label
+    Ntot = aggregate_by_label(Ntot, labels)
+
+    return Ntot
+
+def get_branch_rates(branch_idx, hps, labels=None, z=0.2):
+    rates = get_rates(branch_idx, hps, z=z)
+
+    if labels is None:
+        return rates
+    # aggregate by label
+    rates = aggregate_by_label(rates, labels)
+
+    return rates
+
+# def get_Ntot_by_label(hps, n_labelled_comps):
+#     if not branch_names:
+#         setup_data_module(model_name)
+    
+#     draw_ctx = get_draw_ctx(model_name, model_sig)
+#     hps = draw_ctx["samples_input"]
+#     labels = draw_ctx["labels_input"]
+
+#     comp_label_info = get_comp_label_info(model_name)
+
+#     # for comp_name, comp_sig, c in zip(
+#     #     comp_label_info["comp_names"],
+#     #     comp_label_info["comp_sigs"],
+#     #     comp_label_info["colors"],
+#     #     strict=True
+#     # ):
+
+    
+#     comp_Ntot = {}
+#     if "redshift" in hp_ordering[-1]:
+#         Ntot = get_branch_Ntot(hps, -1)
+#         R0s = np.sum(np.stack([np.nansum(hp[..., -1], axis=1) for hp in hps[:-1]], axis=0), axis=0)
+#         comp_Ntot = {comp_name: Ntot for comp_name in comp_label_info["comp_names"]}
+        
+    
+#     else:  
+#         for comp_name, comp_sig in zip(
+#             comp_label_info["comp_names"],
+#             comp_label_info["comp_sigs"],
+#             strict=True
+#         ):
+#             pass
+
+
