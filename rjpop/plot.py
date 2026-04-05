@@ -1,22 +1,58 @@
 import os
 
 import numpy as np
+import seaborn as sns
 from popsummary.popresult import PopulationResult
 
 lvk_res_path = "/work/aqc/data/GWTC_data/processed/o4a-astro"
 import sys
 
 sys.path.append(os.path.join(lvk_res_path, "figure_scripts"))
-import plot_funcs_bbh_mass as pf
-
-pf.setup()
-
 import matplotlib.colors as pltc
 import matplotlib.pyplot as plt
-from matplotlib import gridspec
+import plot_funcs_bbh_mass as pf
+from matplotlib import gridspec, rcParams
+from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
 
 ### PLOTTING UTILS
+
+param_latex = {
+    "mass_1_source": "$m_1$",
+    "mass_2_source": "$m_2$",
+    "mass_ratio": "$q$",
+    "chi_eff": r"$\chi_{\mathrm{eff}}$",
+    "redshift": "$z$",
+}
+
+plot_style = {
+    "font.family": "serif",
+    "mathtext.fontset": "cm",
+    "axes.linewidth": 0.4,
+    "axes.labelsize": 9,
+    "axes.titlesize": 10,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 9,
+    "figure.titlesize": 11,
+    "lines.linewidth": 0.5,
+    "axes.grid": True,
+    "grid.alpha": 0.2,
+    "grid.linestyle": ":",
+    "figure.figsize": (4, 3),
+    "figure.dpi": 150,
+    "savefig.dpi": 300,
+    "savefig.format": "pdf",
+    "savefig.bbox": "tight",
+    "text.usetex": True,
+    "axes.labelpad": 2.5,
+}
+
+
+def setup():
+    rcParams.update(plot_style)
+    # rcParams["xtick.major.pad"] = "6"
+    # rcParams["ytick.major.pad"] = "6"
 
 
 def textsc_ify(word: str) -> str:
@@ -24,15 +60,30 @@ def textsc_ify(word: str) -> str:
 
 
 def plot_ppds(
-    ax, x, ppds, color="k", CI=90, label=None, fill_alpha=0.3, lw=2, ls="-", swap_xy=False
+    ax,
+    x,
+    ppds,
+    color="k",
+    CI=90,
+    label=None,
+    fill_alpha=0.3,
+    lw=1,
+    ls="-",
+    swap_xy=False,
+    rasterize=False,
 ):
     if CI is None:
-        for ppd in ppds:  # plot individual ppds
-            if np.any(ppd > 0):
-                if swap_xy:
-                    ax.plot(ppd, x, color=color, alpha=0.15, lw=0.1)
-                else:
-                    ax.plot(x, ppd, color=color, alpha=0.15, lw=0.1)
+        ppds = ppds[np.any(ppds > 0, axis=-1)]
+        segments = np.empty((ppds.shape[0], ppds.shape[1], 2))
+        segments[..., 0] = x
+        segments[..., 1] = ppds
+        if swap_xy:
+            segments[..., [0, 1]] = segments[..., [1, 0]]
+        lc = LineCollection(segments, linewidths=0.3, alpha=0.15, colors=color)
+        if rasterize:
+            lc.set_rasterized(True)
+        ax.add_collection(lc)
+
         if label is not None:
             ax.plot([], [], lw=1, color=color, label=label)
 
@@ -106,7 +157,8 @@ def get_level_values(Z, percentiles):
     return np.unique(levels) * total  # scale back
 
 
-def initialize_2D_plotting_axes(figsize=(10, 10)):
+def initialize_2D_plotting_axes(figsize=(5, 5)):
+    plt.close()
     fig = plt.figure(figsize=figsize)
     gs = gridspec.GridSpec(
         2, 2, width_ratios=(4, 1), height_ratios=(1, 4), wspace=0.05, hspace=0.05
@@ -127,11 +179,10 @@ def plot_2D_contours_and_marginals(
     axes=None,
     contour=True,
     CI=None,
+    rasterize_ppds=True,
     levels=(0.5, 0.9, 0.99),
     xlabel=None,
     ylabel=None,
-    x_param_ylog=False,
-    y_param_ylog=False,
     x_param_ylim=None,
     y_param_ylim=None,
     alpha=1,
@@ -143,8 +194,8 @@ def plot_2D_contours_and_marginals(
     else:
         fig, ax_joint, ax_x, ax_y = axes
 
-    plot_ppds(ax_x, xx, x_marg_ppd, color=color, CI=CI)
-    plot_ppds(ax_y, yy, y_marg_ppd, color=color, CI=CI, swap_xy=True)
+    plot_ppds(ax_x, xx, x_marg_ppd, color=color, CI=CI, rasterize=rasterize_ppds)
+    plot_ppds(ax_y, yy, y_marg_ppd, color=color, CI=CI, swap_xy=True, rasterize=rasterize_ppds)
     # swap x and y for y param
 
     # construct colormap
@@ -178,25 +229,33 @@ def plot_2D_contours_and_marginals(
             norm=pltc.LogNorm(vmin=vmin, vmax=vmax),
             **plot_kwargs,
         )
-    ax_joint.set_xlabel(xlabel)
-    ax_joint.set_ylabel(ylabel)
-    ax_x.tick_params(axis="x", labelbottom=False)
-    ax_y.tick_params(axis="y", labelleft=False)
 
     ref_x = np.nanpercentile(x_marg_ppd, 99)
     ref_y = np.nanpercentile(y_marg_ppd, 99)
-    if x_param_ylog:
+    
+    # logscale both axes
+    if ref_x > 0:
         ax_x.set_yscale("log")
-        ax_x.set_ylim(1e-4 * ref_x, 3 * ref_x)
-    else:
-        ax_x.set_ylim(0, ref_x)
-    if y_param_ylog:
+        if x_param_ylim:
+            ax_x.set_ylim(x_param_ylim)
+        else:
+            ax_x.set_ylim(1e-4 * ref_x, 3 * ref_x)
+
+    if ref_y > 0:
         ax_y.set_xscale("log")
-        ax_y.set_xlim(1e-4 * ref_y, 3 * ref_y)
-    else:
-        ax_y.set_xlim(0, ref_y)
-    ax_x.set_ylim(x_param_ylim)
-    ax_y.set_xlim(y_param_ylim)
+        if y_param_ylim:
+            ax_y.set_xlim(y_param_ylim)
+        else:
+            ax_y.set_xlim(1e-4 * ref_y, 3 * ref_y)
+
+    ax_joint.set_xlabel(xlabel, fontsize=10)
+    ax_joint.set_ylabel(ylabel, fontsize=10)
+    ax_x.tick_params(axis="x", labelbottom=False)
+    ax_y.tick_params(axis="y", labelleft=False)
+    ax_x.set_ylabel(f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{xlabel.strip('$')}$", fontsize=8, labelpad=6)
+    ax_y.set_xlabel(f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{ylabel.strip('$')}$", fontsize=8, labelpad=6)
+    ax_x.set_yticks([])
+    ax_y.set_xticks([])
 
     return fig, ax_joint, ax_x, ax_y
     # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
@@ -234,19 +293,23 @@ def shade_triangle(ax, plane="upper half", color="#e7e7e7"):
 
 
 corner_defaults = dict(
-    color="darkred",
-    plot_points=False,
+    color="cornflowerblue",
     levels=[0.5, 0.9],
     show_titles=True,
-    title_kwargs={"fontsize": 15},
-    label_kwargs={"fontsize": 15},
+    title_kwargs={"fontsize": 11},
+    label_kwargs={"fontsize": 11},
+    labelpad=-0.07,
+    hist_kwargs=dict(histtype="stepfilled", alpha=0.7, density=True),
     density=True,
-    # smooth=0.9,
-    smooth=None,
+    smooth=1.0,
+    plot_datapoints=False,
+    plot_density=False,
     fill_contours=True,
-    bins=20,
+    bins=12,
     title_fmt=".2f",
     hist_bin_factor=1,
+    max_n_ticks=4,
+    use_math_text=True,
     quantiles=[0.05, 0.5, 0.95],
 )
 
@@ -259,26 +322,6 @@ invisible_corner_kwargs = dict(
     no_fill_contours=True,
 )
 
-plot_style = {
-    "font.family": "serif",
-    "mathtext.fontset": "cm",
-    "axes.labelsize": 12,
-    "axes.titlesize": 14,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 10,
-    "figure.titlesize": 16,
-    "lines.linewidth": 1.5,
-    "axes.grid": True,
-    "grid.alpha": 0.3,
-    "figure.figsize": (8, 6),
-    "figure.dpi": 100,
-    "savefig.dpi": 250,
-    "savefig.format": "pdf",
-    "savefig.bbox": "tight",
-    "text.usetex": True,
-}
-
 texnames = {
     "mass_1_source": r"$m_1$",
     "mass_2_source": r"$m_2$",
@@ -286,6 +329,17 @@ texnames = {
     "redshift": r"$z$",
     "chi_eff": r"$\chi_\mathrm{eff}$",
 }
+
+# color palettes - reorder to the colors I like better hehe
+
+Tab10 = sns.color_palette("deep")
+tab10 = Tab10[8:6:-1] + Tab10[6:3:-1] + Tab10[8:] + Tab10[:3]
+
+Set2 = sns.color_palette("Set2")
+set2 = [Set2[0], Set2[2], Set2[3], Set2[1]] + Set2[4:]
+
+# hard coded in - for consistency with NPLNP colors
+skewt_colors = [set2[0], set2[2], set2[1], set2[3]]
 
 
 def setup_and_plot_GWTC4(
@@ -319,7 +373,6 @@ def setup_and_plot_GWTC4(
                 label_default = r"$\textsc{LVK BP2P}$"
         pf.setup_mass_plot(
             ax,
-            grid_kwargs=dict(ls="dotted", color="k", alpha=0),
             xrange=(2, 100),
             yrange=(1e-3, 40),
         )
@@ -327,7 +380,6 @@ def setup_and_plot_GWTC4(
     elif param_name == "mass_2_source":
         pf.setup_mass_plot(
             ax,
-            grid_kwargs=dict(ls="dotted", color="k", alpha=0),
             xrange=(2, 80),
             yrange=(1e-3, 40),
         )
@@ -345,7 +397,7 @@ def setup_and_plot_GWTC4(
             else:
                 x, y = pf.get_params(res, "mass_ratio")
                 label_default = r"$\textsc{LVK BP2P}$"
-        pf.setup_mass_ratio_plot(ax, grid_kwargs=dict(ls="dotted", color="k", alpha=0.3))
+        pf.setup_mass_ratio_plot(ax)
 
     elif param_name == "redshift":
         if res is not None:
@@ -359,8 +411,6 @@ def setup_and_plot_GWTC4(
 
         ax.set_xlabel("$z$")
         ax.set_ylabel("$\\mathcal{R}(z)$ [Gpc${}^{-3}$ yr${}^{-1}$]")
-
-        ax.grid(ls=":", alpha=0.2, lw=1, color="k")
 
     else:
         print(f"Unrecognized plotting parameter {param_name}")
