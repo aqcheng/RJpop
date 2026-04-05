@@ -1,19 +1,30 @@
-import os
-
 import numpy as np
 import seaborn as sns
 from popsummary.popresult import PopulationResult
-
-lvk_res_path = "/work/aqc/data/GWTC_data/processed/o4a-astro"
-import sys
-
-sys.path.append(os.path.join(lvk_res_path, "figure_scripts"))
 import matplotlib.colors as pltc
 import matplotlib.pyplot as plt
-import plot_funcs_bbh_mass as pf
 from matplotlib import gridspec, rcParams
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
+
+# Optional LVK plotting helpers (from the data release figure_scripts directory).
+# Call setup_lvk_plot_funcs(lvk_res_path) before using setup_and_plot_GWTC4.
+pf = None
+
+
+def setup_lvk_plot_funcs(lvk_res_path):
+    """Load plot_funcs_bbh_mass from the LVK data release figure_scripts directory."""
+    global pf
+    import os
+    import sys
+
+    sys.path.append(os.path.join(lvk_res_path, "figure_scripts"))
+    try:
+        import plot_funcs_bbh_mass as _pf
+
+        pf = _pf
+    except ImportError as e:
+        print(f"Warning: could not import LVK plot functions from {lvk_res_path}: {e}")
 
 ### PLOTTING UTILS
 
@@ -365,39 +376,42 @@ def setup_and_plot_GWTC4(
         ax.axvline(0, ls="--", color="gray")
 
     elif param_name == "mass_1_source":
-        if res is not None:
+        if res is not None and pf is not None:
             x, y = pf.get_params(res, "mass_1")
             if "BSpline" in res.fname:
                 label_default = r"$\textsc{LVK Spline}$"
             else:
                 label_default = r"$\textsc{LVK BP2P}$"
-        pf.setup_mass_plot(
-            ax,
-            xrange=(2, 100),
-            yrange=(1e-3, 40),
-        )
+        if pf is not None:
+            pf.setup_mass_plot(
+                ax,
+                xrange=(2, 100),
+                yrange=(1e-3, 40),
+            )
 
     elif param_name == "mass_2_source":
-        pf.setup_mass_plot(
-            ax,
-            xrange=(2, 80),
-            yrange=(1e-3, 40),
-        )
-        ylabel = ax.get_ylabel()
-        ax.set_ylabel(ylabel.replace("m_1", "m_2"))
+        if pf is not None:
+            pf.setup_mass_plot(
+                ax,
+                xrange=(2, 80),
+                yrange=(1e-3, 40),
+            )
+            ylabel = ax.get_ylabel()
+            ax.set_ylabel(ylabel.replace("m_1", "m_2"))
         ax.set_xlabel(r"$m_2 \left[ \mathrm{M}_\odot \right]$")
         # don't plot LVK results
         return
 
     elif param_name == "mass_ratio":
-        if res is not None:
+        if res is not None and pf is not None:
             if "BSpline" in res.fname:
                 x, y = pf.get_params(res, "rate_vs_mass_ratio_at_z0-2", rate=False)
                 label_default = r"$\textsc{LVK Spline}$"
             else:
                 x, y = pf.get_params(res, "mass_ratio")
                 label_default = r"$\textsc{LVK BP2P}$"
-        pf.setup_mass_ratio_plot(ax)
+        if pf is not None:
+            pf.setup_mass_ratio_plot(ax)
 
     elif param_name == "redshift":
         if res is not None:
@@ -419,7 +433,7 @@ def setup_and_plot_GWTC4(
     if not isinstance(label, str):
         label = label_default if label else None
 
-    if x is not None and y is not None:
+    if x is not None and y is not None and pf is not None:
         pf.plot_90CI(
             ax,
             x,

@@ -1,14 +1,12 @@
 import argparse
 import json
 import os
-import sys
 from glob import glob
 
 import data
 import numpy as np
 from xp import xp
 
-sys.path.append("/work/aqc/lib/Eryn/src")
 # packages for post-processing
 import matplotlib as mpl
 import seaborn as sns
@@ -66,6 +64,7 @@ parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), he
 # plotting options
 parser.add_argument('--mmax_plot', type=float, default=100, help='Maximum mass to plot for mass_1_source and mass_2_source')
 parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
+parser.add_argument('--lvk_res_path', type=str, default=None, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
 parser.add_argument('--corner_param', type=int, nargs='+', default=None, help='An additional parameter to plot across all components. Should be a list of indices, corresponding to the parameter index of each branch in order. (-1 to skip branch)')
@@ -1278,7 +1277,11 @@ def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
 
 
 if args.LVK_plot != "none":
-    lvk_res_path = "/work/aqc/data/GWTC_data/processed/o4a-astro"
+    if args.lvk_res_path is None:
+        raise ValueError("--lvk_res_path is required when --LVK_plot != none")
+    lvk_res_path = args.lvk_res_path
+
+    plot.setup_lvk_plot_funcs(lvk_res_path)
 
     # plot LVK results as reference
     # does not work for chirp mass

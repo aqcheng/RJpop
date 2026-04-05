@@ -1,0 +1,1 @@
+--prior examples/prior_skewt_z.json --PE_samples /work/aqc/data/GWTC_data/processed/GWTC2p1_3_4_PE_samples.npz --injs /work/aqc/data/GWTC_data/processed/o1_o2_o3_o4a_injs.npz --outdir /data/aqc/rjmcmc_pop/results/O4 --burn 20000 --nsteps 30000 --ntemps 5 --Tmax 5 --nwalkers 20 --min_sep 1 --rj_num_try 2 --label skewt_z --corner_param -2

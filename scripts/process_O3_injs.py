@@ -2,11 +2,11 @@ import h5py
 import numpy as np
 
 import sys
-sys.path.append('/work/aqc/lib/effective-spin-priors')
+sys.path.append('/work/aqc/lib/effective-spin-priors')  # replace with your path to effective-spin-priors
 from priors import chi_effective_prior_from_isotropic_spins
 
-inpath = '/work/aqc/data/GWTC_data/LVK_injections/endo3_bbhpop-LIGO-T2100113-v12.hdf5'
-outpath = '/work/aqc/data/GWTC_data/processed/o3_injs.npz'
+inpath = '/work/aqc/data/GWTC_data/LVK_injections/endo3_bbhpop-LIGO-T2100113-v12.hdf5'  # replace with your path
+outpath = '/work/aqc/data/GWTC_data/processed/o3_injs.npz'  # replace with your desired output path
 prefix = ''
 
 # far_thr = 1 #1/yr

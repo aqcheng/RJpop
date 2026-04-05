@@ -6,7 +6,7 @@ try:
     from cupyx import scatter_add
     from cupyx.scipy import special
 
-    use_cupy = True 
+    use_cupy = True
 
 except (ModuleNotFoundError, ImportError) as e:
     import numpy as xp

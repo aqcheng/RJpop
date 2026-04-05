@@ -1,0 +1,37 @@
+[
+    {
+        "__branch__": "local",
+        "__ncomp__": [1,4],
+        "mass": {
+            "__model__": "m1_q",
+            "mass_1_source": {
+                "__model__": "skew-t",
+                "logalpha": [-1.0, 2.0],
+                "logkappa": [ -2.0, 2.0],
+                "loc": [6.0, 60.0],
+                "scale": [ 1.0, 15.0]
+            },
+            "mass_ratio": {
+                "__model__": "gauss",
+                "loc": [0.1, 1.0],
+                "scale": [0.03, 1.0]
+            } 
+        },
+        "chi_eff": {
+            "__model__": "gauss",
+            "loc": [-1.0, 1.0],
+            "scale": [0.03, 1.0]
+        },
+        "__factor__": [0.05, 0.01, 0.5, 0.1, 0.03, 0.03, 0.003, 0.003, 0.3]
+    },
+    {
+        "__branch__": "global",
+        "redshift": {
+            "__model__": "PL",
+            "gamma": [-6.0, 6.0]
+        },
+        "mass_1_source": {
+            "xmin": [3, 7]
+        }
+    }
+]

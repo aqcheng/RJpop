@@ -1,0 +1,1 @@
+--prior examples/prior_NPLNP.json --PE_samples /work/aqc/data/GWTC_data/processed/GWTC2p1_3_4_PE_samples.npz --injs /work/aqc/data/GWTC_data/processed/o1_o2_o3_o4a_injs.npz --outdir /data/aqc/rjmcmc_pop/results/O4 --burn 20000 --nsteps 30000 --ntemps 7 --Tmax 25 --nwalkers 30 --label NPLNP --min_sep 2

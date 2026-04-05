@@ -1,11 +1,9 @@
-import sys
 from copy import deepcopy
 
 import data
 import numpy as np
 import utils
 
-sys.path.append("/work/aqc/lib/Eryn/src")
 from eryn.moves import GaussianMove, MHMove
 from eryn.prior import ProbDistContainer
 from eryn.utils import Update

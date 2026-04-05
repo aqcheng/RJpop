@@ -1,12 +1,10 @@
 import os
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 from scipy.optimize import curve_fit
-
-sys.path.append("/work/aqc/lib/Eryn/src")
-import re
 
 from eryn.backends import Backend
 from eryn.ensemble import EnsembleSampler

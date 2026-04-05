@@ -195,7 +195,7 @@ if __name__ == "__main__":
     import h5py
     import numpy as np
 
-    sys.path.append("/work/aqc/lib/effective-spin-priors")
+    sys.path.append("/work/aqc/lib/effective-spin-priors")  # replace with your path to effective-spin-priors
     from astropy.cosmology import Planck15
     from priors import chi_effective_prior_from_isotropic_spins
 

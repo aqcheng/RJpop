@@ -1,9 +1,10 @@
 default_params = ['mass_1_source', 'mass_2_source', 'mass_ratio', 'chirp_mass_source', 'redshift', 'luminosity_distance', 'chi_eff']
 key = 'MDC/posterior_samples'
 
-from astropy.cosmology import Planck15
-import astropy.units as u
 import astropy.constants as const
+import astropy.units as u
+from astropy.cosmology import Planck15
+
 
 def ddL_dz(z):
 
@@ -14,11 +15,11 @@ if __name__ == '__main__':
 
     import argparse
     import os
+    import sys
+
     import h5py
     import numpy as np
-
-    import sys
-    sys.path.append('/work/aqc/lib/effective-spin-priors')
+    sys.path.append('/work/aqc/lib/effective-spin-priors')  # replace with your path to effective-spin-priors
     from priors import chi_effective_prior_from_isotropic_spins
 
     parser = argparse.ArgumentParser()
