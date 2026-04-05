@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
+import utils
 from astropy.cosmology import Planck15
 from xp import EPS, INF, special, xp
+
+ZMAX = 2
 
 
 def trapz(y, x=None, dx=1.0, axis=-1):
@@ -708,9 +711,7 @@ class smoothed_powerlaw:
     def moments(cls, alpha, xmin, xmax, p):
         # use mode for first moment, quantiles for width (approximated w/o low end smoothing)
         mode = xmin * (1 + p / alpha)
-        width = (
-            powerlaw.ppf(0.84, -alpha, xmin, xmax) - powerlaw.ppf(0.16, -alpha, xmin, xmax)
-        ) / 2
+        width = (powerlaw.ppf(0.5, -alpha, xmin, xmax) - mode) / 2
         return mode, width
 
 
@@ -1157,11 +1158,34 @@ class BaseRate:
         """
         raise NotImplementedError
 
-    def pdf(self, z, *args, **kwargs):
-        return self.psi(z, *args, **kwargs) / (1.0 + z) * self.dV_dz(z)
+    def pdf(self, z, *args, zmax=ZMAX, **kwargs):
+        return self.psi(z, *args, **kwargs) / (1.0 + z) * self.dV_dz(z) * (z < zmax)
 
-    def logpdf(self, z, *args, **kwargs):
-        return self.log_psi(z, *args, **kwargs) - xp.log1p(z) + self.log_dV_dz(z)
+    def logpdf(self, z, *args, zmax=ZMAX, **kwargs):
+        return xp.where(
+            z < zmax,
+            self.log_psi(z, *args, **kwargs) - xp.log1p(z) + self.log_dV_dz(z),
+            -INF,
+        )
+
+    def Ntot(self, *args, R0=1, zmax=ZMAX, **kwargs):
+        """
+        Calculates the total number of expected mergers in the spacetime volume (up
+        to zmax).
+        """
+        # need to pad to broadcast with z arr integral
+        if args:
+            args = [utils.pad(x) for x in args]
+        if kwargs:
+            kwargs = utils.recursive_pad(kwargs)
+
+        z_arr_filter = self._z_arr < zmax
+        zz = self._z_arr[z_arr_filter]
+        Vzz = self._dV_dz_arr[z_arr_filter]
+
+        psizz = xp.nan_to_num(self.psi(zz, *args, **kwargs), nan=0, posinf=0, neginf=0)
+
+        return xp.trapz(Vzz * psizz / (1.0 + zz), zz) * R0
 
 
 class PL_rate(BaseRate):
@@ -1179,7 +1203,7 @@ class PL_rate(BaseRate):
     @staticmethod
     def moments(gamma):
         # Just use the power law exponent to differentiate models
-        return gamma, xp.zeros_like(gamma)
+        return (gamma,)
 
 
 class MD_rate(BaseRate):
@@ -1196,3 +1220,127 @@ class MD_rate(BaseRate):
     def log_psi_MD(z, gamma, kappa, zp):
         logC = xp.log1p(xp.power(1 + zp, -(gamma + kappa)))
         return gamma * xp.log1p(z) - xp.log1p(((1.0 + z) / (1.0 + zp)) ** (gamma + kappa)) + logC
+
+
+### HARD CODED MODEL DEFINITIONS
+
+# dictionary of models and their hyperparameters -- these are manually hard coded in
+XMAX_FIX = 300.0
+MODELS = {
+    "mass": {
+        "param_latex": {"m2max": r"$m_{2,\max}$"},
+        "m1_q": {"model": m1_q_model, "param_latex": {}},
+        "m1_q_m2max": {"model": m1_q_m2max_model, "param_latex": {"m2max": r"$m_{2,\max}$"}},
+        "gaussian_copula": {
+            "model": gaussian_copula_mass_model,
+            "param_latex": {"rho": r"$\rho$"},
+        },
+        "sym_gaussian_copula": {
+            "model": sym_gaussian_copula_mass_model,
+            "param_latex": {"rho": r"$\rho$"},
+        },
+    },
+    "mass_1_source": {  # for p(m1) or p(m2)
+        "param_latex": {  # shared between all models of the parameter
+            "xmin": r"$m_{\min}$",
+            "xmax": r"$m_{\max}$",
+        },
+        "skew-t": {
+            "model": jf_skew_t(),
+            "param_latex": {
+                "logalpha": r"$\log_{10}\alpha$",
+                "logkappa": r"$\log_{10}\kappa$",
+                "loc": r"$\mu_m$",
+                "scale": r"$\sigma_m$",
+            },
+            "params_fix": {"xmax": XMAX_FIX},
+        },
+        "PLS": {
+            "model": smoothed_powerlaw(),
+            "param_latex": {
+                "alpha": r"$\alpha$",
+                "p": r"$p_m$",
+            },
+            "params_fix": {"xmax": XMAX_FIX},
+        },
+        "PLS_LVK": {
+            "model": LVK_Plancktaper_powerlaw(),
+            "param_latex": {
+                "alpha": r"$\alpha$",
+                "delta": r"$\delta_m$",
+            },
+            "params_fix": {"xmax": XMAX_FIX},
+        },
+        "gauss": {
+            "model": gaussian(),
+            "param_latex": {
+                "loc": r"$\mu_p$",
+                "scale": r"$\sigma_p$",
+            },
+            "params_fix": {"xmax": XMAX_FIX},
+        },
+    },
+    "mass_ratio": {
+        "PL": {
+            "model": powerlaw(),
+            "param_latex": {
+                "beta": r"$\beta$",
+            },
+            "params_fix": {
+                "xmax": 1.0,
+            },
+        },
+        "gauss": {
+            "model": gaussian(),
+            "param_latex": {
+                "loc": r"$\mu_{q}$",
+                "scale": r"$\sigma_{q}$",
+            },
+            "params_fix": {"xmax": 1.0},
+        },
+    },
+    "chi_eff": {
+        "gen_gauss": {
+            "model": gen_gaussian(),
+            "param_latex": {
+                "beta": r"$\beta_{\chi}$",
+                "loc": r"$\mu_{\chi}$",
+                "scale": r"$\sigma_{\chi}$",
+            },
+            "params_fix": {"xmin": -1.0, "xmax": 1.0},
+        },
+        "gauss": {
+            "model": gaussian(),
+            "param_latex": {
+                "loc": r"$\mu_{\chi}$",
+                "scale": r"$\sigma_{\chi}$",
+            },
+            "params_fix": {"xmin": -1.0, "xmax": 1.0},
+        },
+    },
+    "redshift": {
+        "MD": {
+            "model": MD_rate(cosmo=Planck15),
+            "param_latex": {
+                "gamma": r"$\gamma$",
+                "kappa": r"$\kappa$",
+                "zp": r"$z_p$",
+            },
+            "params_fix": {},
+        },
+        "PL": {
+            "model": PL_rate(cosmo=Planck15),
+            "param_latex": {"gamma": r"$\gamma$"},
+            "params_fix": {},
+        },
+    },
+}
+PARAM_SCALES = {  # characteristic scales for each parameter
+    "mass_1_source": 8.0,
+    "mass_2_source": 8.0,
+    "mass_ratio": 0.3,
+    "chi_eff": 0.1,
+    "redshift": 1.0,
+    "rate": 10.0,
+}
+RATE_FACTOR = 1.0

@@ -3,139 +3,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from astropy.cosmology import Planck15
 from scipy.optimize import curve_fit
 
 sys.path.append("/work/aqc/lib/Eryn/src")
 import re
 
-import pdfs
 from eryn.backends import Backend
 from eryn.ensemble import EnsembleSampler
 from eryn.utils.utility import get_integrated_act
 from xp import xp
-
-### HARD CODED MODEL DEFINITIONS
-
-# dictionary of models and their hyperparameters -- these are manually hard coded in
-XMAX_FIX = 300.0
-MODELS = {
-    "mass": {
-        "param_latex": {"m2max": r"$m_{2,\max}$"},
-        "m1_q": {"model": pdfs.m1_q_model, "param_latex": {}},
-        "m1_q_m2max": {"model": pdfs.m1_q_m2max_model, "param_latex": {"m2max": r"$m_{2,\max}$"}},
-        "gaussian_copula": {
-            "model": pdfs.gaussian_copula_mass_model,
-            "param_latex": {"rho": r"$\rho$"},
-        },
-        "sym_gaussian_copula": {
-            "model": pdfs.sym_gaussian_copula_mass_model,
-            "param_latex": {"rho": r"$\rho$"},
-        },
-    },
-    "mass_1_source": {  # for p(m1) or p(m2)
-        "param_latex": {  # shared between all models of the parameter
-            "xmin": r"$m_{\min}$",
-            "xmax": r"$m_{\max}$",
-        },
-        "skew-t": {
-            "model": pdfs.jf_skew_t(),
-            "param_latex": {
-                "logalpha": r"$\log_{10}\alpha$",
-                "logkappa": r"$\log_{10}\kappa$",
-                "loc": r"$\mu_m$",
-                "scale": r"$\sigma_m$",
-            },
-            "params_fix": {"xmax": XMAX_FIX},
-        },
-        "PLS": {
-            "model": pdfs.smoothed_powerlaw(),
-            "param_latex": {
-                "alpha": r"$\alpha$",
-                "p": r"$p_m$",
-            },
-            "params_fix": {"xmax": XMAX_FIX},
-        },
-        "PLS_LVK": {
-            "model": pdfs.LVK_Plancktaper_powerlaw(),
-            "param_latex": {
-                "alpha": r"$\alpha$",
-                "delta": r"$\delta_m$",
-            },
-            "params_fix": {"xmax": XMAX_FIX},
-        },
-        "gauss": {
-            "model": pdfs.gaussian(),
-            "param_latex": {
-                "loc": r"$\mu_p$",
-                "scale": r"$\sigma_p$",
-            },
-            "params_fix": {"xmax": XMAX_FIX},
-        },
-    },
-    "mass_ratio": {
-        "PL": {
-            "model": pdfs.powerlaw(),
-            "param_latex": {
-                "beta": r"$\beta$",
-            },
-            "params_fix": {
-                "xmax": 1.0,
-            },
-        },
-        "gauss": {
-            "model": pdfs.gaussian(),
-            "param_latex": {
-                "loc": r"$\mu_{q}$",
-                "scale": r"$\sigma_{q}$",
-            },
-            "params_fix": {"xmax": 1.0},
-        },
-    },
-    "chi_eff": {
-        "gen_gauss": {
-            "model": pdfs.gen_gaussian(),
-            "param_latex": {
-                "beta": r"$\beta_{\chi}$",
-                "loc": r"$\mu_{\chi}$",
-                "scale": r"$\sigma_{\chi}$",
-            },
-            "params_fix": {"xmin": -1.0, "xmax": 1.0},
-        },
-        "gauss": {
-            "model": pdfs.gaussian(),
-            "param_latex": {
-                "loc": r"$\mu_{\chi}$",
-                "scale": r"$\sigma_{\chi}$",
-            },
-            "params_fix": {"xmin": -1.0, "xmax": 1.0},
-        },
-    },
-    "redshift": {
-        "MD": {
-            "model": pdfs.MD_rate(cosmo=Planck15),
-            "param_latex": {
-                "gamma": r"$\gamma$",
-                "kappa": r"$\kappa$",
-                "zp": r"$z_p$",
-            },
-            "params_fix": {},
-        },
-        "PL": {
-            "model": pdfs.PL_rate(cosmo=Planck15),
-            "param_latex": {"gamma": r"$\gamma$"},
-            "params_fix": {},
-        },
-    },
-}
-PARAM_SCALES = {  # characteristic scales for each parameter
-    "mass_1_source": 8.0,
-    "mass_2_source": 8.0,
-    "mass_ratio": 0.3,
-    "chi_eff": 0.1,
-    "redshift": 1.0,
-}
-RATE_FACTOR = 1.0
 
 ### MISC UTILS
 
@@ -206,6 +82,12 @@ def skip_dunder(iter):
             if not (x.startswith("__") or x.endswith("__")):
                 yield x
 
+def pad(arr):
+    arr_ = xp.asarray(arr)
+    if arr_.size <= 1:
+        return arr_
+    else:
+        return arr_[..., None]
 
 def recursive_pad(datadict):
     """
@@ -217,11 +99,7 @@ def recursive_pad(datadict):
         if isinstance(v, dict):
             res[k] = recursive_pad(v)
         else:
-            v_ = xp.asarray(v)
-            if v_.size > 1:
-                res[k] = v_[..., None]
-            else:
-                res[k] = v_
+            res[k] = pad(v)
 
     return res
 
