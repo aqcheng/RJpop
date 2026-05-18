@@ -4,13 +4,10 @@ import os
 from glob import glob
 
 import data
-import numpy as np
-from xp import xp
 
 # packages for post-processing
 import matplotlib as mpl
-import seaborn as sns
-from astropy.cosmology import Planck15
+import numpy as np
 from corner import corner
 from eryn.backends import HDFBackend
 from eryn.moves import (
@@ -22,6 +19,7 @@ from eryn.moves import (
 from eryn.state import State
 from moves import RateMove, UpdateKDEMove
 from pdfs import INF, RATE_FACTOR
+from xp import xp
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt
@@ -31,6 +29,7 @@ import utils
 plot.setup()
 
 # INPUT ARGUMENTS
+lvk_res_path_default = "/work/aqc/data/GWTC_data/processed/o4a-astro" # just for convenience
 
 # fmt: off
 parser = argparse.ArgumentParser()
@@ -62,9 +61,8 @@ parser.add_argument('--min_sep', '--minsep', type=float, default=3.0, help='Enfo
 parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), help="The minimum and maximum rate for the rate prior of each component. Default: (0.05, 100)")
 
 # plotting options
-parser.add_argument('--mmax_plot', type=float, default=100, help='Maximum mass to plot for mass_1_source and mass_2_source')
 parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
-parser.add_argument('--lvk_res_path', type=str, default=None, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
+parser.add_argument('--lvk_res_path', type=str, default=lvk_res_path_default, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
 parser.add_argument('--corner_param', type=int, nargs='+', default=None, help='An additional parameter to plot across all components. Should be a list of indices, corresponding to the parameter index of each branch in order. (-1 to skip branch)')
@@ -315,6 +313,7 @@ for branch_name in rj_branches:
     # `cov` is diagonal. Requires len(covs_all) == len(data.branch_names).
     cov_branch = np.ones(branch_ndims)
     cov_branch[: covs_all[branch_idx].size] = covs_all[branch_idx]
+    cov_branch = np.diag(cov_branch)
     cov = {branch_name: cov_branch}
 
     # move each leaf AND parameter separately
@@ -787,15 +786,20 @@ else:
     # 'samples_dict' is a dict of arrays of each branch with shape (nsamples, ncomps, nparams)
 
     # save samples_dict
+    megadict = {
+        "samples": samples_dict,
+        "labels": labels_dict,
+        "feats": feats_dict,
+        "feat_scales": feat_scales_dict,
+        "cluster_centers": cluster_centers_dict,
+        "sigs": sigs,
+        "sig_names": sig_names,
+        "model_inds": model_inds,
+        "bayes_factors": bayes_factors
+    }
     np.save(
         os.path.join(datapath, "samples_and_labels.npy"),
-        {
-            "samples": samples_dict,
-            "labels": labels_dict,
-            "feats": feats_dict,
-            "feat_scales": feat_scales_dict,
-            "cluster_centers": cluster_centers_dict,
-        },
+        megadict,
         allow_pickle=True,
     )
     print("Saved samples_and_labels.npy")
@@ -916,6 +920,23 @@ if rj_branches:
             submodel_sigs.append(submodel_sigs_all[t])
             submodel_names.append(submodel_sig_names_all[t])
             submodel_bfs.append(float(bf))
+
+# add to samples_and_labels if not already
+if "submodel_sigs" not in megadict:
+    megadict.update({
+        "submodel_sigs": submodel_sigs,
+        "submodel_sig_names": submodel_names,
+        "submodel_inds": submodel_inds,
+        "submodel_bayes_factors": submodel_bfs,
+    })
+    np.save(
+        os.path.join(datapath, "samples_and_labels.npy"),
+        megadict,
+        allow_pickle=True,
+    )
+    print("Saved submodel information to samples_and_labels.npy")
+
+exit()
 
 # get R02s aggregated by label
 R0s_by_label, R02s_by_label, Ntots_by_label = [], [], []
@@ -1215,17 +1236,6 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
                 os.path.join(datapath, draw_ctx_fn), allow_pickle=True
             ).item()
 
-# construct grid for evaluating data
-ngrid = 256
-data_grid = {
-    "mass_1_source": np.linspace(2, args.mmax_plot, 2 * ngrid),
-    "mass_2_source": np.linspace(2, args.mmax_plot, 2 * ngrid),
-    "mass_ratio": np.linspace(0, 1, ngrid),
-    "chi_eff": np.linspace(-1, 1, ngrid),
-    "redshift": np.linspace(0, 1.5, ngrid),
-}
-
-
 def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
     """Compute (label-aggregated) PPD contributions for one branch.
 
@@ -1284,7 +1294,6 @@ if args.LVK_plot != "none":
     plot.setup_lvk_plot_funcs(lvk_res_path)
 
     # plot LVK results as reference
-    # does not work for chirp mass
     from popsummary.popresult import PopulationResult
 
     if args.LVK_plot == "default":
@@ -1339,7 +1348,7 @@ def plot_model_ppd(
     param_name_check = "mass" if param_name.startswith("mass") else param_name
     # assumes joint mass model -- currently hard coded in
 
-    x = data_grid[param_name]
+    x = data.data_grid[param_name]
     dict_out = {}  # save ppd by component
     if any(param_name_check in hps for hps in data.hp_ordering[:-1]):
         # local parameter
@@ -1362,12 +1371,6 @@ def plot_model_ppd(
             # plot GWTC-4 on all plots
             plot.setup_and_plot_GWTC4(param_name, ax_comp, res=res, spin_res=spin_res, label=None)
             plot.setup_and_plot_GWTC4(param_name, ax_tot, res=res, spin_res=spin_res)
-            if param_name == "mass_1_source" or param_name == "mass_2_source":
-                ax_comp.set_xlim(right=args.mmax_plot)
-                ax_tot.set_xlim(right=args.mmax_plot)
-                if args.mmax_plot > 100:
-                    ax_comp.set_ylim(bottom=1e-5)
-                    ax_tot.set_ylim(bottom=1e-5)
 
             draw_ctx = model_draw_ctxs[sig]
 
@@ -1493,7 +1496,7 @@ def plot_model_ppd(
         draw_ctx = model_draw_ctxs[0]
         R02 = draw_ctx["R02_tot_draws"]
 
-        ppd, R02 = _branch_label_ppd(data_grid[param_name], param_name, -1, draw_ctx)
+        ppd, R02 = _branch_label_ppd(data.data_grid[param_name], param_name, -1, draw_ctx)
         ppd, R02 = ppd[0], R02[0]  # remove ncomps axis
         if param_name == "chi_eff":
             ppd = ppd / R02[:, None]
@@ -1578,275 +1581,6 @@ else:
 
 # finally, plot 2D!!
 
-
-def _extract_marg_ppd(x_param, model_sig, comp_label=None, plot_submodels=False):
-
-    if plot_submodels:
-        ppds_dict = submodel_ppds_dict
-    else:
-        ppds_dict = model_ppds_dict
-
-    if "ppd" in model_ppds_dict[x_param]:  # x is a global parameter
-        res = model_ppds_dict[x_param]["ppd"]
-    else:
-        if comp_label is None:
-            res = np.sum(model_ppds_dict[x_param][model_sig], axis=0)
-        elif comp_label in ppds_dict[f"{x_param}_labelled"][model_sig]:
-            res = ppds_dict[f"{x_param}_labelled"][model_sig][comp_label]
-        else:
-            raise ValueError(f"Unrecognized component label {comp_label}")
-    
-    if x_param == "redshift":
-        # for 2D we want to plot R(z) not psi(z)
-        zz = data_grid["redshift"]
-        res *= 4 * np.pi * Planck15.differential_comoving_volume(zz).value / 1e9 / (1 + zz)
-    
-    return res
-
-def _compute_mass_ppds(x_param, y_param, model_sig=0, plot_submodels=False):
-
-    if plot_submodels:
-        model_draw_ctxs = draw_ctxs["submodel"]
-    else:
-        model_draw_ctxs = draw_ctxs["model"]
-
-    xx = model_ppds_dict[x_param]["x"]
-    yy = model_ppds_dict[y_param]["x"]
-
-    hyperparams = model_draw_ctxs[model_sig]["samples_input"]
-
-    xx_, yy_ = np.meshgrid(xx, yy, indexing="ij")
-    mass_data = {x_param: xp.asarray(xx_.ravel()), y_param: xp.asarray(yy_.ravel())}
-    if "mass_2_source" not in mass_data:
-        mass_data["mass_2_source"] = mass_data["mass_1_source"] * mass_data["mass_ratio"]
-    elif "mass_ratio" not in mass_data:
-        mass_data["mass_ratio"] = mass_data["mass_2_source"] / mass_data["mass_1_source"]
-    else:
-        raise ValueError(
-            f"Unrecognized mass parameter combination {x_param} and {y_param}. One parameter must be `mass_1_source` and the other must be `mass_ratio` or `mass_2_source`."
-        )
-
-    mass_ppds = {}
-    for branch_idx, bn in enumerate(data.branch_names[:-1]):
-        branch_R02 = data.get_rates(branch_idx, hyperparams)  # (nsamples, ncomps)
-        if "mass" in data.hp_ordering[branch_idx]:
-            if "model" in data.hp_ordering[branch_idx]["mass"]:  # primary model
-                branch_xy_ppd = (
-                    utils.to_numpy(
-                        data.eval_param_model(mass_data, branch_idx, "mass", hyperparams)
-                    )
-                    * branch_R02[..., None]
-                )  # this is R(m1, q)
-                if "mass_2_source" in (x_param, y_param):  # convert to p(m1, m2)
-                    branch_xy_ppd = branch_xy_ppd / utils.to_numpy(mass_data["mass_1_source"])
-                branch_xy_ppd = np.nan_to_num(branch_xy_ppd, nan=0.0, posinf=0.0, neginf=0.0)
-                mass_ppds[bn] = branch_xy_ppd.reshape(
-                    branch_xy_ppd.shape[:-1] + (xx.size, yy.size)
-                )
-                # should be (nsamples, ncomp, ngrid, ngrid)
-
-    return mass_ppds
-
-# NEED TO FIX - I DON'T WANT TO PLOT COMBINED TOTAL ONLY TOTAL FOR DIFF MODELS
-
-def _plot_param_2D_contours_and_marginals(
-    x_param,
-    y_param,
-    model_sig,
-    color="cornflowerblue",
-    axes=None,
-    comp_label=None,
-    savefig=None,
-    mass_ppds=None,
-    return_pxy_mean=False,
-    plot_submodels=False,
-    **contour_kwargs,
-):
-
-    if plot_submodels:
-        ppds_dict = submodel_ppds_dict
-        model_draw_ctxs = draw_ctxs["submodel"]
-    else:
-        ppds_dict = model_ppds_dict
-        model_draw_ctxs = draw_ctxs["model"]
-
-    if not plot_submodels:
-        if rj_branches:
-            assert model_sig in ppds_dict["model_sigs"], (
-                f"model_name must be one of {ppds_dict['model_sigs']}"
-            )
-        else:
-            assert model_sig == 0
-    assert x_param in model_ppds_dict
-    assert y_param in model_ppds_dict
-
-    x_global = "ppd" in model_ppds_dict[x_param]
-    y_global = "ppd" in model_ppds_dict[y_param]
-
-    draw_ctx = model_draw_ctxs[model_sig]
-    if rj_branches:
-        comp_labels = model_ppds_dict["comp_labels"]["comp_names"]
-    else:
-        comp_labels = data.branch_names[:-1]
-    comp_rates = draw_ctx["R02_labelled_draws"].T  # (nsamples, ncomps) -> (ncomps, nsamples)
-    model_sig_safe = utils.get_safe_fn(model_sig)  # for saving plots
-    if plot_submodels:
-        if model_sig in draw_ctxs["submodel"].keys():
-            model_sig_safe += "_submodel"
-
-    if x_param.startswith("mass") and y_param.startswith("mass") and mass_ppds is None:
-        # pre-compute mass ppds to save time in recursive calls
-        mass_ppds = _compute_mass_ppds(x_param, y_param, model_sig, plot_submodels=plot_submodels)
-
-    if (comp_label == "all") and not (x_global and y_global):  # plot all together, in one plot
-        # this is just a recursive call
-        ncomps = len(comp_labels)
-
-        # weight each components by alpha ~ sqrt(braching frac.) -- helps with visibility
-        branching_fracs = comp_rates / np.nansum(comp_rates, axis=0, keepdims=True)
-        comp_alphas = np.sqrt(np.nanmean(branching_fracs, axis=1))
-        comp_alphas /= np.amax(comp_alphas)
-        comp_alphas *= contour_kwargs.get("alpha", 1.0)
-
-        idx_order = np.argsort(comp_alphas)  # plot smallest components first
-
-        if isinstance(color, (list, sns.palettes._ColorPalette)) and len(color) >= ncomps:
-            colors = color[:ncomps]
-        else:
-            # get color palette from ppds_dict
-            colors = model_ppds_dict["comp_labels"]["colors"]
-
-        bad_idx = []
-        p_xy_mean_tot = 0.0
-        for idx in idx_order:
-            comp_label, color, alpha = comp_labels[idx], colors[idx], comp_alphas[idx]
-            axes, p_xy_mean = _plot_param_2D_contours_and_marginals(
-                x_param,
-                y_param,
-                model_sig,
-                color=color,
-                alpha=alpha,
-                savefig=None,
-                axes=axes,
-                comp_label=comp_label,
-                mass_ppds=mass_ppds,
-                return_pxy_mean=True,
-                plot_submodels=plot_submodels,
-                **contour_kwargs,
-            )
-            p_xy_mean_tot = p_xy_mean_tot + p_xy_mean
-            if np.all(np.isclose(p_xy_mean, 0.0, atol=1e-10)):
-                bad_idx.append(idx)
-        handles = [
-            mpl.lines.Line2D(
-                [],
-                [],
-                color=colors[i],
-                label=plot.textsc_ify(comp_labels[i]),
-            )
-            for i in range(ncomps)
-            if i not in bad_idx
-        ]
-        ax_x = axes[2]
-        ax_x.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.05), ncol=ncomps)
-
-        if savefig:
-            if not isinstance(savefig, str):
-                savefig = f"contours2d_{x_param}_{y_param}_{model_sig_safe}_labelled.pdf"
-            axes[0].savefig(os.path.join(figpath, savefig))
-            print(f"Saved {savefig}")
-        if return_pxy_mean:
-            return axes, p_xy_mean
-        return axes
-
-    # want to plot marginals on the side
-    p_x_marg = _extract_marg_ppd(x_param, model_sig, comp_label, plot_submodels=plot_submodels)
-    p_y_marg = _extract_marg_ppd(y_param, model_sig, comp_label, plot_submodels=plot_submodels)
-
-    # get x/y grid from dict
-    xx = model_ppds_dict[x_param]["x"]
-    yy = model_ppds_dict[y_param]["x"]
-
-    if x_param.startswith("mass") and y_param.startswith("mass"):
-        if comp_label is None:  # just want total
-            p_xy = [
-                np.nansum(b_ppd, axis=1) for b_ppd in mass_ppds.values()
-            ]  # add components together
-            p_xy = np.sum(np.stack(p_xy), axis=0)  # add branches together
-        else:  # have to extract component from labels
-            comp_idx = comp_labels.index(comp_label)
-            bn, b_label_idx = model_ppds_dict["comp_labels"]["comp_sigs"][comp_idx]
-            labels = draw_ctx["labels_input"][data.branch_names.index(bn)]
-            mask = (labels == b_label_idx)[..., None, None]
-            p_xy = np.nansum(mass_ppds[bn] * mask, axis=1)
-    else:
-        if (comp_label is None) and not (x_global and y_global) and rj_branches:
-            p_xy = 0.0
-            for comp_label_, comp_rate in zip(comp_labels, comp_rates, strict=True):
-                comp_x_ppd = _extract_marg_ppd(
-                    x_param, model_sig, comp_label_, plot_submodels=plot_submodels
-                )
-                comp_y_ppd = _extract_marg_ppd(
-                    y_param, model_sig, comp_label_, plot_submodels=plot_submodels
-                )
-                comp_xy_ppd = np.where(
-                    comp_rate[:, None, None] > 0,
-                    np.expand_dims(comp_x_ppd, 2)
-                    * np.expand_dims(comp_y_ppd, 1)
-                    / comp_rate[:, None, None],
-                    0.0,
-                )
-                p_xy = p_xy + comp_xy_ppd
-        else:
-            R02_tot = draw_ctx["R02_tot_draws"]
-            p_xy = (
-                np.expand_dims(p_x_marg, 2) * np.expand_dims(p_y_marg, 1) / R02_tot[:, None, None]
-            )
-
-    p_xy_mean = np.nanmean(p_xy, axis=0)
-    if np.all(np.isclose(p_xy_mean, 0.0, atol=1e-10)):
-        print(
-            f"WARNING: PDF is zero for {x_param} vs {y_param} for model `{model_sig}` and component `{comp_label}`."
-        )
-    else:
-        axes = plot.plot_2D_contours_and_marginals(
-            xx,
-            yy,
-            p_x_marg,
-            p_y_marg,
-            p_xy_mean,
-            color=color,
-            axes=axes,
-            rasterize_ppds=args.rasterize,
-            xlabel=plot.texnames.get(x_param, x_param),
-            ylabel=plot.texnames.get(y_param, y_param),
-            **contour_kwargs,
-        )
-
-        # plot m1m2 triangle if needed
-        ax_joint = axes[1]
-        if len(ax_joint.patches) == 0:  # no triangle yet
-            if x_param == "mass_1_source" and y_param == "mass_2_source":
-                ax_joint = plot.shade_triangle(ax_joint)
-            elif x_param == "mass_2_source" and y_param == "mass_1_source":
-                ax_joint = plot.shade_triangle(ax_joint, plane="lower half")
-
-    if savefig:
-        if not isinstance(savefig, str):
-            fn_parts = ["contours2d", x_param, y_param]
-            if model_sig:
-                fn_parts.append(model_sig_safe)
-            fn_parts.append("tot" if comp_label is None else utils.get_safe_fn(comp_label))
-            savefig = "_".join(fn_parts) + ".pdf"
-        axes[0].savefig(os.path.join(figpath, savefig))
-        print(f"Saved {savefig}")
-
-    if return_pxy_mean:
-        return axes, p_xy_mean
-
-    return axes
-
-
 # plot 2d contours of best model
 for param_x, param_y in [
     ("mass_ratio", "chi_eff"),
@@ -1862,43 +1596,55 @@ for param_x, param_y in [
     if save_or_not(f"contours2d_{param_x}_{param_y}*_tot.pdf"):
         for sig_name, bf in zip(sig_names, bayes_factors, strict=False):
             if bf > 0.5:
-                _plot_param_2D_contours_and_marginals(  # total
+                data.plot_param_2D_contours_and_marginals(  # total
                     param_x,
                     param_y,
                     model_sig=sig_name,
+                    draw_ctxs=draw_ctxs,
+                    model_ppds_dict=model_ppds_dict,
                     savefig=True,
+                    figpath=figpath,
                     levels=(0.5, 0.9, 0.99),
                     color="cornflowerblue",
                     comp_label=None,
                     CI=90,
+                    rasterize=args.rasterize
                 )
     if save_or_not(f"contours2d_{param_x}_{param_y}*_labelled.pdf"):
         for sig_name, bf in zip(sig_names, bayes_factors, strict=False):
             if bf > 0.5:
-                _plot_param_2D_contours_and_marginals(  # all individually
+                data.plot_param_2D_contours_and_marginals(  # all individually
                     param_x,
                     param_y,
                     model_sig=sig_name,
+                    draw_ctxs=draw_ctxs,
+                    model_ppds_dict=model_ppds_dict,
                     savefig=True,
+                    figpath=figpath,
                     levels=(0.5, 0.9),
                     color=component_palette,
                     comp_label="all",
                     CI=None,
+                    rasterize=args.rasterize
                 )
     if plot_submodels:
         if save_or_not(f"contours2d_{param_x}_{param_y}*_submodel_labelled.pdf"):
             for sig_name, bf in zip(submodel_names, submodel_bfs, strict=True):
                 if bf > 0.5:
-                    _plot_param_2D_contours_and_marginals(  # all individually
+                    data.plot_param_2D_contours_and_marginals(  # all individually
                         param_x,
                         param_y,
                         model_sig=sig_name,
+                        draw_ctxs=draw_ctxs,
+                        model_ppds_dict=model_ppds_dict,
+                        submodel_ppds_dict=submodel_ppds_dict,
                         savefig=True,
+                        figpath=figpath,
                         levels=(0.5, 0.9),
                         color=component_palette,
                         comp_label="all",
                         CI=None,
-                        plot_submodels=True,
+                        rasterize=args.rasterize
                     )
 
 R02_low, R02_med, R02_high = np.percentile(R02_tot, [5, 50, 95])

@@ -1,11 +1,11 @@
-import numpy as np
-import seaborn as sns
-from popsummary.popresult import PopulationResult
 import matplotlib.colors as pltc
 import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 from matplotlib import gridspec, rcParams
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
+from popsummary.popresult import PopulationResult
 
 # Optional LVK plotting helpers (from the data release figure_scripts directory).
 # Call setup_lvk_plot_funcs(lvk_res_path) before using setup_and_plot_GWTC4.
@@ -26,6 +26,7 @@ def setup_lvk_plot_funcs(lvk_res_path):
     except ImportError as e:
         print(f"Warning: could not import LVK plot functions from {lvk_res_path}: {e}")
 
+
 ### PLOTTING UTILS
 
 param_latex = {
@@ -40,17 +41,17 @@ plot_style = {
     "font.family": "serif",
     "mathtext.fontset": "cm",
     "axes.linewidth": 0.4,
-    "axes.labelsize": 9,
-    "axes.titlesize": 10,
+    "axes.labelsize": 10,
+    "axes.titlesize": 12,
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
-    "legend.fontsize": 9,
-    "figure.titlesize": 11,
+    "legend.fontsize": 11,
+    "figure.titlesize": 12,
     "lines.linewidth": 0.5,
     "axes.grid": True,
-    "grid.alpha": 0.2,
+    "grid.alpha": 0.3,
     "grid.linestyle": ":",
-    "figure.figsize": (4, 3),
+    "figure.figsize": (3.5, 2.75),
     "figure.dpi": 150,
     "savefig.dpi": 300,
     "savefig.format": "pdf",
@@ -77,8 +78,11 @@ def plot_ppds(
     color="k",
     CI=90,
     label=None,
+    line_alpha=0.15,
     fill_alpha=0.3,
     lw=1,
+    secondary_lw=0,
+    lws=0.3,
     ls="-",
     swap_xy=False,
     rasterize=False,
@@ -90,7 +94,7 @@ def plot_ppds(
         segments[..., 1] = ppds
         if swap_xy:
             segments[..., [0, 1]] = segments[..., [1, 0]]
-        lc = LineCollection(segments, linewidths=0.3, alpha=0.15, colors=color)
+        lc = LineCollection(segments, linewidths=lws, alpha=line_alpha, colors=color)
         if rasterize:
             lc.set_rasterized(True)
         ax.add_collection(lc)
@@ -102,17 +106,26 @@ def plot_ppds(
         dist = (100 - CI) / 2
         percs = [dist, 50, 100 - dist]
         low, med, high = np.nanpercentile(ppds, percs, axis=0)
-        if swap_xy:
-            ax.plot(med, x, color=color, lw=lw, ls=ls)
-        else:
-            ax.plot(x, med, color=color, lw=lw, ls=ls)
-        if label is not None:
-            label = textsc_ify(label)
 
         if swap_xy:
             ax.fill_betweenx(x, low, high, color=color, alpha=fill_alpha, label=label)
         else:
             ax.fill_between(x, low, high, color=color, alpha=fill_alpha, label=label)
+            
+        if swap_xy:
+            if lw:
+                ax.plot(med, x, color=color, lw=lw, ls=ls)
+            if secondary_lw:
+                ax.plot(low, x, color=color, lw=secondary_lw, ls="--")
+                ax.plot(high, x, color=color, lw=secondary_lw, ls="--")
+        else:
+            if lw:
+                ax.plot(x, med, color=color, lw=lw, ls=ls)
+            if secondary_lw:
+                ax.plot(x, low, color=color, lw=secondary_lw, ls="--")
+                ax.plot(x, high, color=color, lw=secondary_lw, ls="--")
+        if label is not None:
+            label = textsc_ify(label)
 
 
 def plot_chains(
@@ -168,7 +181,7 @@ def get_level_values(Z, percentiles):
     return np.unique(levels) * total  # scale back
 
 
-def initialize_2D_plotting_axes(figsize=(5, 5)):
+def initialize_2D_plotting_axes(figsize=(4,4)):
     plt.close()
     fig = plt.figure(figsize=figsize)
     gs = gridspec.GridSpec(
@@ -189,6 +202,8 @@ def plot_2D_contours_and_marginals(
     color="cornflowerblue",
     axes=None,
     contour=True,
+    contourf=True,
+    figsize=(4,4),
     CI=None,
     rasterize_ppds=True,
     levels=(0.5, 0.9, 0.99),
@@ -197,16 +212,26 @@ def plot_2D_contours_and_marginals(
     x_param_ylim=None,
     y_param_ylim=None,
     alpha=1,
-    **plot_kwargs,
+    ppd_kwargs=None,
+    contour_kwargs=None,
+    contourf_kwargs=None,
 ):
 
+    if contour_kwargs is None:
+        contour_kwargs = {}
+    if contourf_kwargs is None:
+        contourf_kwargs = {}
+    if ppd_kwargs is None:
+        ppd_kwargs = {}
+
     if axes is None:
-        fig, ax_joint, ax_x, ax_y = initialize_2D_plotting_axes()
+        fig, ax_joint, ax_x, ax_y = initialize_2D_plotting_axes(figsize)
     else:
         fig, ax_joint, ax_x, ax_y = axes
 
-    plot_ppds(ax_x, xx, x_marg_ppd, color=color, CI=CI, rasterize=rasterize_ppds)
-    plot_ppds(ax_y, yy, y_marg_ppd, color=color, CI=CI, swap_xy=True, rasterize=rasterize_ppds)
+    ppd_kwargs_ = dict(color=color, CI=CI, rasterize=rasterize_ppds) | ppd_kwargs
+    plot_ppds(ax_x, xx, x_marg_ppd, **ppd_kwargs_)
+    plot_ppds(ax_y, yy, y_marg_ppd, swap_xy=True, **ppd_kwargs_)
     # swap x and y for y param
 
     # construct colormap
@@ -215,22 +240,30 @@ def plot_2D_contours_and_marginals(
     cmap = pltc.LinearSegmentedColormap.from_list(f"{str(color).capitalize()}s", [light, base])
     vmin, vmax = np.nanmin(p_xy_mean[p_xy_mean > 0]), np.nanmax(p_xy_mean)
     # extent = (xx[0], xx[-1], yy[0], yy[-1])
-    if contour:
+    if contour or contourf:
         contour_levels = get_level_values(p_xy_mean, levels)
         X, Y = np.meshgrid(xx, yy)
-        ax_joint.contourf(
-            X, Y, p_xy_mean.T, levels=contour_levels, cmap=cmap, origin="lower", **plot_kwargs
-        )
-        ax_joint.contour(
-            X,
-            Y,
-            p_xy_mean.T,
-            levels=contour_levels,
-            colors=color,
-            origin="lower",
-            alpha=alpha,
-            **plot_kwargs,
-        )
+        if contourf:
+            ax_joint.contourf(
+                X,
+                Y,
+                p_xy_mean.T,
+                levels=contour_levels,
+                cmap=cmap,
+                origin="lower",
+                **contourf_kwargs,
+            )
+        if contour:
+            ax_joint.contour(
+                X,
+                Y,
+                p_xy_mean.T,
+                levels=contour_levels,
+                colors=color,
+                origin="lower",
+                alpha=alpha,
+                **contour_kwargs,
+            )
     else:
         ax_joint.imshow(
             p_xy_mean.T,
@@ -238,35 +271,37 @@ def plot_2D_contours_and_marginals(
             origin="lower",
             cmap=cmap,
             norm=pltc.LogNorm(vmin=vmin, vmax=vmax),
-            **plot_kwargs,
+            **contour_kwargs,
         )
 
     ref_x = np.nanpercentile(x_marg_ppd, 99)
     ref_y = np.nanpercentile(y_marg_ppd, 99)
-    
+
     # logscale both axes
     if ref_x > 0:
         ax_x.set_yscale("log")
         if x_param_ylim:
             ax_x.set_ylim(x_param_ylim)
         else:
-            ax_x.set_ylim(1e-4 * ref_x, 3 * ref_x)
+            ax_x.set_ylim(1e-3 * ref_x, 3 * ref_x)
 
     if ref_y > 0:
         ax_y.set_xscale("log")
         if y_param_ylim:
             ax_y.set_xlim(y_param_ylim)
         else:
-            ax_y.set_xlim(1e-4 * ref_y, 3 * ref_y)
+            ax_y.set_xlim(1e-3 * ref_y, 3 * ref_y)
 
     ax_joint.set_xlabel(xlabel, fontsize=10)
     ax_joint.set_ylabel(ylabel, fontsize=10)
-    ax_x.tick_params(axis="x", labelbottom=False)
-    ax_y.tick_params(axis="y", labelleft=False)
-    ax_x.set_ylabel(f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{xlabel.strip('$')}$", fontsize=8, labelpad=6)
-    ax_y.set_xlabel(f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{ylabel.strip('$')}$", fontsize=8, labelpad=6)
-    ax_x.set_yticks([])
-    ax_y.set_xticks([])
+    ax_x.tick_params(axis="both", which="both", labelleft=False, labelbottom=False, length=0)
+    ax_y.tick_params(axis="both", which="both", labelleft=False, labelbottom=False, length=0)
+    ax_x.set_ylabel(
+        f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{xlabel.strip('$')}$", fontsize=8, labelpad=6
+    )
+    ax_y.set_xlabel(
+        f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{ylabel.strip('$')}$", fontsize=8, labelpad=6
+    )
 
     return fig, ax_joint, ax_x, ax_y
     # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
@@ -359,9 +394,15 @@ def setup_and_plot_GWTC4(
     res: PopulationResult | None = None,
     spin_res: PopulationResult | None = None,
     label=True,
+    pf_kwargs=None,
+    CI_kwargs=None,
 ):
 
+    if pf_kwargs is None:
+        pf_kwargs = {}
+
     x, y = None, None
+    label_default = None
 
     if param_name == "chi_eff":
         if spin_res is not None:
@@ -373,7 +414,6 @@ def setup_and_plot_GWTC4(
         ax.set_ylabel(r"$p(\chi_\mathrm{eff})$")
         ax.set_ylim(0, 5.5)
         ax.set_xlim(-0.35, 0.65)
-        ax.axvline(0, ls="--", color="gray")
 
     elif param_name == "mass_1_source":
         if res is not None and pf is not None:
@@ -383,22 +423,14 @@ def setup_and_plot_GWTC4(
             else:
                 label_default = r"$\textsc{LVK BP2P}$"
         if pf is not None:
-            pf.setup_mass_plot(
-                ax,
-                xrange=(2, 100),
-                yrange=(1e-3, 40),
-            )
+            pf.setup_mass_plot(ax, xrange=(2, 100), yrange=(1e-3, 40), **pf_kwargs)
 
     elif param_name == "mass_2_source":
         if pf is not None:
-            pf.setup_mass_plot(
-                ax,
-                xrange=(2, 80),
-                yrange=(1e-3, 40),
-            )
+            pf.setup_mass_plot(ax, xrange=(2, 80), yrange=(1e-3, 40), **pf_kwargs)
             ylabel = ax.get_ylabel()
             ax.set_ylabel(ylabel.replace("m_1", "m_2"))
-        ax.set_xlabel(r"$m_2 \left[ \mathrm{M}_\odot \right]$")
+        ax.set_xlabel(r"$m_2 \,\left[ \mathrm{M}_\odot \right]$")
         # don't plot LVK results
         return
 
@@ -411,13 +443,13 @@ def setup_and_plot_GWTC4(
                 x, y = pf.get_params(res, "mass_ratio")
                 label_default = r"$\textsc{LVK BP2P}$"
         if pf is not None:
-            pf.setup_mass_ratio_plot(ax)
+            pf.setup_mass_ratio_plot(ax, **pf_kwargs)
 
     elif param_name == "redshift":
         if res is not None:
             x, y = res.get_rates_on_grids("redshift")
             x = x[0]  # bro why did the LVK code it like this
-            label_default = "LVK"
+            label_default = r"$\textsc{LVK}$"
 
         ax.set_yscale("log")
         ax.set_ylim([8, 3e3])
@@ -434,10 +466,7 @@ def setup_and_plot_GWTC4(
         label = label_default if label else None
 
     if x is not None and y is not None and pf is not None:
-        pf.plot_90CI(
-            ax,
-            x,
-            y,
+        line_default_kwargs = dict(
             color="k",
             median=False,
             fill=False,
@@ -446,3 +475,7 @@ def setup_and_plot_GWTC4(
             label=label,
             fill_alpha=0.3,
         )
+        if CI_kwargs:
+            line_default_kwargs.update(CI_kwargs)
+
+        pf.plot_90CI(ax, x, y, **line_default_kwargs)

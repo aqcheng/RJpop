@@ -1,14 +1,12 @@
 import os
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import curve_fit
-
 from eryn.backends import Backend
 from eryn.ensemble import EnsembleSampler
 from eryn.utils.utility import get_integrated_act
+from scipy.optimize import curve_fit
 from xp import xp
 
 ### MISC UTILS
