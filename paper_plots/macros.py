@@ -116,6 +116,13 @@ def trunc_gauss_ppf(q, mu, sigma, xmin=-1.0, xmax=1.0):
     return _truncnorm.ppf(q, a, b, loc=mu, scale=sigma)
 
 
+def chieff_pos_frac(mu, sigma, xmin=-1.0, xmax=1.0):
+    """P(chi_eff > 0) for a truncated Gaussian on [xmin, xmax], array inputs mu, sigma."""
+    a = (xmin - mu) / sigma
+    b = (xmax - mu) / sigma
+    return _truncnorm.sf(0.0, a, b, loc=mu, scale=sigma)
+
+
 def _nz(val, fmt):
     """Format val; force negative-zero strings like '-0.00' to '0.00'."""
     s = format(val, fmt)
@@ -224,9 +231,10 @@ if __name__ == "__main__":
         ppf_50 = trunc_gauss_ppf(0.50, mu_c, sig_c)
         ppf_95 = trunc_gauss_ppf(0.95, mu_c, sig_c)
 
-        add_ci(f"chiefflow{comp_tag}skewt",  ppf_05, fmt=".2f")
-        add_ci(f"chieffmed{comp_tag}skewt",  ppf_50, fmt=".2f")
-        add_ci(f"chieffhigh{comp_tag}skewt", ppf_95, fmt=".2f")
+        add_ci(f"chiefflow{comp_tag}skewt",     ppf_05, fmt=".2f")
+        add_ci(f"chieffmed{comp_tag}skewt",     ppf_50, fmt=".2f")
+        add_ci(f"chieffhigh{comp_tag}skewt",    ppf_95, fmt=".2f")
+        add_ci(f"chieffposfrac{comp_tag}skewt", chieff_pos_frac(mu_c, sig_c), fmt=".2f")
 
         # mu_chi > 0 confidence (only for ten and tail)
         if comp_tag in ("ten", "tail"):
@@ -286,9 +294,10 @@ if __name__ == "__main__":
     ppf_05 = trunc_gauss_ppf(0.05, mu_c_tail, sig_c_tail)
     ppf_50 = trunc_gauss_ppf(0.50, mu_c_tail, sig_c_tail)
     ppf_95 = trunc_gauss_ppf(0.95, mu_c_tail, sig_c_tail)
-    add_ci("chiefflowtailNPLNP",  ppf_05, fmt=".2f")
-    add_ci("chieffmedtailNPLNP",  ppf_50, fmt=".2f")
-    add_ci("chieffhightailNPLNP", ppf_95, fmt=".2f")
+    add_ci("chiefflowtailNPLNP",     ppf_05, fmt=".2f")
+    add_ci("chieffmedtailNPLNP",     ppf_50, fmt=".2f")
+    add_ci("chieffhightailNPLNP",    ppf_95, fmt=".2f")
+    add_ci("chieffposfractailNPLNP", chieff_pos_frac(mu_c_tail, sig_c_tail), fmt=".2f")
     add_pct("muchiposconfidencetailNPLNP", np.mean(mu_c_tail > 0))
 
     # mu_q for tail
@@ -311,9 +320,10 @@ if __name__ == "__main__":
         ppf_05 = trunc_gauss_ppf(0.05, mu_c, sig_c)
         ppf_50 = trunc_gauss_ppf(0.50, mu_c, sig_c)
         ppf_95 = trunc_gauss_ppf(0.95, mu_c, sig_c)
-        add_ci(f"chiefflow{comp_tag}NPLNP",  ppf_05, fmt=".2f")
-        add_ci(f"chieffmed{comp_tag}NPLNP",  ppf_50, fmt=".2f")
-        add_ci(f"chieffhigh{comp_tag}NPLNP", ppf_95, fmt=".2f")
+        add_ci(f"chiefflow{comp_tag}NPLNP",     ppf_05, fmt=".2f")
+        add_ci(f"chieffmed{comp_tag}NPLNP",     ppf_50, fmt=".2f")
+        add_ci(f"chieffhigh{comp_tag}NPLNP",    ppf_95, fmt=".2f")
+        add_ci(f"chieffposfrac{comp_tag}NPLNP", chieff_pos_frac(mu_c, sig_c), fmt=".2f")
 
         if comp_tag == "ten":  # only requested for ten
             add_pct(f"muchiposconfidence{comp_tag}NPLNP", np.mean(mu_c > 0))
@@ -403,9 +413,13 @@ if __name__ == "__main__":
 
         sections = [
             ("chi_eff distribution percentiles – skewt",
-             [n for n in macros if "chieff" in n and "skewt" in n.lower()]),
+             [n for n in macros if "chieff" in n and "skewt" in n.lower() and "posfrac" not in n]),
             ("chi_eff distribution percentiles – NPLNP",
-             [n for n in macros if "chieff" in n and "NPLNP" in n]),
+             [n for n in macros if "chieff" in n and "NPLNP" in n and "posfrac" not in n]),
+            ("chi_eff positive fraction (P(chieff>0)) – skewt",
+             [n for n in macros if "chieffposfrac" in n and "skewt" in n.lower()]),
+            ("chi_eff positive fraction (P(chieff>0)) – NPLNP",
+             [n for n in macros if "chieffposfrac" in n and "NPLNP" in n]),
             ("mu_chi > 0 confidence",
              [n for n in macros if "muchipos" in n]),
             ("mu_m – skewt",

@@ -427,7 +427,7 @@ def setup_and_plot_GWTC4(
 
     elif param_name == "mass_2_source":
         if pf is not None:
-            pf.setup_mass_plot(ax, xrange=(2, 80), yrange=(1e-3, 40), **pf_kwargs)
+            pf.setup_mass_plot(ax, xrange=(2, 100), yrange=(1e-3, 40), **pf_kwargs)
             ylabel = ax.get_ylabel()
             ax.set_ylabel(ylabel.replace("m_1", "m_2"))
         ax.set_xlabel(r"$m_2 \,\left[ \mathrm{M}_\odot \right]$")

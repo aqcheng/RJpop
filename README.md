@@ -11,7 +11,7 @@ where:
 - $\mathcal{R}_0^k$ is the local merger rate density of the $k$th subpopulation
 - $p^k(\theta|\lambda^k)$ is its probability distribution over masses, mass ratio, and effective spin
 - $\psi(z|\lambda^k)$ is its redshift evolution function
-- $\lambda^k$ are the hyperparameters for the $k$th subpopulation
+- $\lambda^k$ are the hyperparameters for the *k*th subpopulation
 
 Reversible jump allows us to infer $\lambda^k$ for $k=1, 2, \ldots, N$ for varying $N$ by effectively simultaneously doing model comparison during the inference, thus optimizing the model complexity. We use the reversible-jump framework implemented in [Eryn](https://github.com/mikekatz04/Eryn), which also includes affine-invariant sampling and parallel tempering.
 
