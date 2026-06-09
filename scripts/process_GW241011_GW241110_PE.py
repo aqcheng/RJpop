@@ -1,11 +1,4 @@
 # python -u process_GW241011_GW241110_PE.py --out_path /work/aqc/data/GWTC_data/processed
-
-import sys
-
-sys.path.append(
-    "/work/aqc/lib/effective-spin-priors"
-)  # replace with your path to effective-spin-priors
-
 DATA_DIR = "/work/aqc/data/GWTC_data/GW241011_GW241110_data_release/data/standard_pe"
 
 EVENTS = {
@@ -29,7 +22,8 @@ if __name__ == "__main__":
     import h5py
     import numpy as np
     from astropy.cosmology import Planck15
-    from priors import chi_effective_prior_from_isotropic_spins
+
+    from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
 
     parser = argparse.ArgumentParser()
     parser.add_argument(

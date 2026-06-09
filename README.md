@@ -53,7 +53,6 @@ examples/
 
 **Dependencies:**
 - [Eryn](https://github.com/mikekatz04/Eryn) — the ensemble sampler backend
-- [effective-spin-priors](https://github.com/cjhaster/effective-spin-priors) — for preprocessing scripts only
 - Standard scientific Python stack: `numpy`, `scipy`, `astropy`, `h5py`, `matplotlib`, `seaborn`, `corner`, `sklearn`
 - Optional: `cupy` for GPU acceleration
 - Optional: `popsummary` for overlaying LVK reference results on plots
@@ -200,7 +199,8 @@ The following models are available (see `pdfs.py` for details):
 
 ## GPU acceleration
 
-If [CuPy](https://cupy.dev/) is installed, the likelihood and model evaluations automatically run on GPU. No code changes are needed — the `xp.py` module handles the NumPy/CuPy dispatch transparently.
+If [CuPy](https://cupy.dev/) is installed, the likelihood and model evaluations automatically run on GPU. No code changes are needed — the `xp.py` module handles the NumPy/CuPy dispatch transparently. Note that this
+code has not been tested on CPUs.
 
 ## Citation
 
