@@ -1,10 +1,10 @@
 import h5py
 import numpy as np
 
-from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
+from priors import chi_effective_prior_from_isotropic_spins
 
-inpath = '/work/aqc/data/GWTC_data/LVK_injections/mixture-semi_o1_o2-real_o3_o4a-polar_spins_20250503134659UTC.hdf'  # replace with your path
-outpath = '/work/aqc/data/GWTC_data/processed/o1_o2_o3_o4a_injs.npz'  # replace with your desired output path
+inpath = '/scratch/gpfs/ANDREASB/ct6081/LVK_DATA/injections/16740128/mixture-semi_o1_o2-real_o3_o4a-polar_spins_20250503134659UTC.hdf'  # replace with your path
+outpath = '/scratch/gpfs/ANDREASB/aqc/data/LVK_DATA/processed/o1_o2_o3_o4a_injs.npz'  # replace with your desired output path
 
 far_thr = 1 #1/yr
 rho_thr = 10
