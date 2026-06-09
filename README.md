@@ -15,6 +15,9 @@ where:
 
 Reversible jump allows us to infer $\lambda^k$ for $k=1, 2, \ldots, N$ for varying $N$ by effectively simultaneously doing model comparison during the inference, thus optimizing the model complexity. We use the reversible-jump framework implemented in [Eryn](https://github.com/mikekatz04/Eryn), which also includes affine-invariant sampling and parallel tempering.
 
+This code was used to [analyze the GWTC-4 dataset](https://inspirehep.net/literature/3159273). The version of this code used to produce the results in the paper is archived at [`v1.0.0`](https://github.com/aqcheng/RJpop/releases/tag/v1.0.0). 
+The `main` branch reflects ongoing development and may differ from the paper version.
+
 ## Repository structure
 
 `rjpop` contains the code for the inference framework, `scripts` contains scripts for processing GWTC data into the products used by `rjpop`, and `examples` contains prior configurations and argument files for several runs used in the associated paper.
