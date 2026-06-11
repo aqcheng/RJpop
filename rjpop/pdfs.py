@@ -156,9 +156,15 @@ class trunc_dist(dist):
     @classmethod
     def pdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
 
-        pdf_unnorm = (
-            cls._pdf(rescale(x, loc, scale), *args, **kwargs) / scale * ((x >= xmin) & (x <= xmax))
-        )
+        # Build the unnormalized truncated pdf in place to avoid full-size copies
+        # (`_pdf` returns a fresh owned buffer). Multiplying by all-True masks when a
+        # bound is infinite is a no-op, so those branches are simply skipped.
+        pdf_unnorm = cls._pdf(rescale(x, loc, scale), *args, **kwargs)
+        pdf_unnorm /= scale
+        if xmin is not -INF:
+            pdf_unnorm *= x >= xmin
+        if xmax is not INF:
+            pdf_unnorm *= x <= xmax
 
         # normalize
         cdf_high = cls._cdf(rescale(xmax, loc, scale), *args, **kwargs) if xmax is not INF else 1
@@ -168,7 +174,8 @@ class trunc_dist(dist):
 
         norm[~(norm > 0)] = xp.inf  # Guard against division by zero (degenerate truncation)
 
-        return pdf_unnorm / norm
+        pdf_unnorm /= norm
+        return pdf_unnorm
 
     @classmethod
     def logpdf(cls, x, *args, loc=0, scale=1, xmin=-INF, xmax=INF, **kwargs):
@@ -311,11 +318,28 @@ class jf_skew_t(trunc_dist):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
 
         c = 2 ** (a + b - 1) * special.beta(a, b) * xp.sqrt(a + b)
-        u = (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)
 
-        result = (1 + u) ** (a + 0.5) * (1 - u) ** (b + 0.5) / c
+        # u = (x + shift) / sqrt(a + b + (x + shift)^2), and then
+        # result = (1 + u)^(a + 0.5) * (1 - u)^(b + 0.5) / c.
+        # Computed with in-place ops on locally-owned full-size buffers (the input
+        # `x` is never mutated) to keep only ~2 full-size arrays alive at once --
+        # this is the dominant memory term when evaluated on PE samples / injections.
+        u = x + shift
+        denom = u * u
+        denom += a + b
+        xp.sqrt(denom, out=denom)
+        u /= denom  # u = (x + shift) / sqrt(...)
+        del denom
+
+        right = 1.0 - u
+        right **= b + 0.5
+        u += 1.0
+        u **= a + 0.5
+        u *= right
+        u /= c
+
         # Guard against NaN from 0/0 or inf/inf when c is degenerate
-        return xp.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        return xp.nan_to_num(u, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
     def _logpdf(x, logalpha, logkappa):
@@ -336,7 +360,7 @@ class jf_skew_t(trunc_dist):
 
     @staticmethod
     def _moments(logalpha, logkappa, **kwargs):
-        """
+        r"""
         Returns the mode and a characteristic width via the Gaussian curvature variance
 
         .. math::
@@ -615,7 +639,7 @@ class powerlaw:
 
 
 class smoothed_powerlaw:
-    """
+    r"""
     Implements the power-law distribution with minimum, maximum, and lower-end smoothing.
     This is a different smoothing function from LVK s.t. the smoothing function is integrable.
 
@@ -868,9 +892,10 @@ class m1_q_model(MassModel):
             raise ValueError(f"Unknown parameter {param}")
 
     def pdf(self, data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
-        return self.m1_model.pdf(
-            data["mass_1_source"], **mass_1_source_kwargs
-        ) * self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs)
+        # p(m1) * p(q | m1), multiplied in place to avoid an extra full-size copy
+        p = self.m1_model.pdf(data["mass_1_source"], **mass_1_source_kwargs)
+        p *= self._p_q_given_m1(data, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs)
+        return p
 
     def moments(self, mass_1_source_kwargs, mass_ratio_kwargs, **kwargs):
         mass_ratio_kwargs = mass_ratio_kwargs.copy()
@@ -902,7 +927,7 @@ class m1_q_m2max_model(m1_q_model):
 
 
 def gaussian_copula(u, v, rho):
-    """
+    r"""
     Implements the Gaussian copula
 
     .. math::

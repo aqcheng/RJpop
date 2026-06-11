@@ -21,6 +21,9 @@ from moves import RateMove, UpdateKDEMove
 from pdfs import INF, RATE_FACTOR
 from xp import xp
 
+from rjpop.load_config import load_config
+cfg = load_config()
+
 mpl.use("Agg")
 import matplotlib.pyplot as plt
 import plot
@@ -28,8 +31,13 @@ import utils
 
 plot.setup()
 
-# INPUT ARGUMENTS
-lvk_res_path_default = "/work/aqc/data/GWTC_data/processed/o4a-astro" # just for convenience
+if not hasattr(np, "in1d"): # eryn is built on an older version of numpy; np.in1d has been phased out
+    def _in1d(ar1, ar2, assume_unique=False, invert=False):
+        ar1_flat = np.asarray(ar1).ravel()
+        ar2_flat = np.asarray(ar2).ravel()
+        return np.isin(ar1_flat, ar2_flat, assume_unique=assume_unique, invert=invert)
+ 
+    np.in1d = _in1d
 
 # fmt: off
 parser = argparse.ArgumentParser()
@@ -49,6 +57,7 @@ parser.add_argument('--nwalkers', '-nwalkers', type=int, default=50, help='Numbe
 parser.add_argument('--ntemps', '-ntemps', type=int, default=5, help='Number of temperatures (for parallel tempering)')
 parser.add_argument('--Tmax', default=None, type=float, help='Maximum temperature (for parallel tempering)')
 parser.add_argument('--rj_num_try', default=1, type=int, help='Number of tries for MT MCMC')
+parser.add_argument('--group_chunk_size', type=int, default=None, help='Evaluate the likelihood in batches of at most this many groups (temperature x walker x rj_num_try combinations) to cap peak GPU memory. Default: None (all groups in one pass). Lower it if you hit out-of-memory errors during RJ moves.')
 parser.add_argument('--nsteps', '-nsteps', type=int, default=2000, help='Number of steps')
 parser.add_argument('--burn', '-burn', type=int, default=0, help='Number of burn-in steps.')
 parser.add_argument('--kde_update', type=int, default=0, help='Every kde_update steps, update the KDE from which the reversible jump moves are proposed. Default: 0 (never update, use prior for rj proposals)')
@@ -61,8 +70,9 @@ parser.add_argument('--min_sep', '--minsep', type=float, default=3.0, help='Enfo
 parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), help="The minimum and maximum rate for the rate prior of each component. Default: (0.05, 100)")
 
 # plotting options
-parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
-parser.add_argument('--lvk_res_path', type=str, default=lvk_res_path_default, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
+# parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
+# parser.add_argument('--lvk_res_path', type=str, default=lvk_res_path_default, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
+parser.add_argument('--popsummary_path', type=str, default=None, help='Path to the popsummary directory for LVK results. Retrieves from config.json [o4b-astro_path]/popsummary_files, then falls back to [o4a-astro_path]/data_release by default')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
 parser.add_argument('--corner_param', type=int, nargs='+', default=None, help='An additional parameter to plot across all components. Should be a list of indices, corresponding to the parameter index of each branch in order. (-1 to skip branch)')
@@ -161,7 +171,7 @@ if args.test:
 # -----------------------------
 # maybe test loglike function above and see if it actually reprodjces P(m1) as expected
 
-loglike_kwargs = {"min_sep": args.min_sep}
+loglike_kwargs = {"min_sep": args.min_sep, "group_chunk_size": args.group_chunk_size}
 
 if args.test:
     ngroups_test = 5
@@ -1285,34 +1295,50 @@ def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
     return rate_ppd_by_label, rate_by_label
     # output shapes: (ncomps, nsamples, ngrid), (ncomps, nsamples), (ngrid)
 
+popsummary_path = args.popsummary_path 
+if popsummary_path is None:
+    if cfg.get("o4b-astro_path", None) is not None:
+        popsummary_path = os.path.join(cfg.get("o4b-astro_path"), "popsummary_files")
+        plot_cat = "GWTC5"
+    elif cfg.get("o4a-astro_path", None) is not None:
+        popsummary_path = os.path.join(cfg.get("o4a-astro_path"), "data_release")
+        plot_cat = "GWTC4"
+    else:
+        plot_cat = None 
+else:
+    plot_cat = "GWTC5" if "o4b-astro" in popsummary_path else (
+        "GWTC4" if "o4a-astro" in popsummary_path else None
+    )
 
-if args.LVK_plot != "none":
-    if args.lvk_res_path is None:
-        raise ValueError("--lvk_res_path is required when --LVK_plot != none")
-    lvk_res_path = args.lvk_res_path
-
-    plot.setup_lvk_plot_funcs(lvk_res_path)
-
-    # plot LVK results as reference
+res, spin_res = None, None 
+if popsummary_path is not None: 
     from popsummary.popresult import PopulationResult
-
-    if args.LVK_plot == "default":
+    if plot_cat == "GWTC5":
         res = PopulationResult(
             fname=os.path.join(
-                lvk_res_path,
-                "data_release/BBHMassSpinRedshift_BrokenPowerLawTwoPeaks_GaussianComponentSpins_PowerLawRedshift.h5",
+                popsummary_path,
+                "gwtc5_updated_default_mmax_mass_TwoPeakBrokenPowerLawSmoothedMassDistribution_redshift_PowerLawRedshift_magnitude_iid_spin_magnitude_gaussian_tilt_iid_spin_orientation_popsummary_result.h5",
             )
         )
-    elif args.LVK_plot == "spline":
-        res = PopulationResult(
-            fname=os.path.join(lvk_res_path, "data_release/BBHMassSpinRedshift_BSplineIID.h5")
+        spin_res = PopulationResult(
+            fname=os.path.join(
+                popsummary_path,
+                "260512_skewNormalChiEffChiP_varcut1/popsummary_var_cut_1.0_with2Drates.h5",
+            )
         )
-    spin_res = PopulationResult(
-        fname=os.path.join(lvk_res_path, "data_release/BBHSpin_EpsSkewNormalChiEff.h5")
-    )
-else:
-    res, spin_res = None, None
-
+    elif plot_cat == "GWTC4":
+        res = PopulationResult(
+            fname=os.path.join(
+                popsummary_path,
+                "BBHMassSpinRedshift_BrokenPowerLawTwoPeaks_GaussianComponentSpins_PowerLawRedshift.h5",
+            )
+        )
+        spin_res = PopulationResult(
+            fname=os.path.join(
+                popsummary_path,
+                "BBHSpin_EpsSkewNormalChiEff.h5",
+            )
+        )
 
 def plot_model_ppd(
     param_name, color_tot="cornflowerblue", use_labels=True, plot_submodels=False, max_plot=3
@@ -1369,8 +1395,8 @@ def plot_model_ppd(
             ax_comp, ax_tot = row_axes
 
             # plot GWTC-4 on all plots
-            plot.setup_and_plot_GWTC4(param_name, ax_comp, res=res, spin_res=spin_res, label=None)
-            plot.setup_and_plot_GWTC4(param_name, ax_tot, res=res, spin_res=spin_res)
+            plot.setup_and_plot_GWTC(param_name, ax_comp, res=res, spin_res=spin_res, label=None, catalog=plot_cat)
+            plot.setup_and_plot_GWTC(param_name, ax_tot, res=res, spin_res=spin_res, catalog=plot_cat)
 
             draw_ctx = model_draw_ctxs[sig]
 
@@ -1501,7 +1527,7 @@ def plot_model_ppd(
         if param_name == "chi_eff":
             ppd = ppd / R02[:, None]
 
-        plot.setup_and_plot_GWTC4(param_name, ax, res=res)
+        plot.setup_and_plot_GWTC(param_name, ax, res=res, catalog=plot_cat)
         plot.plot_ppds(ax, x, ppd, CI=90, color=color_tot)
         ax.legend()
 

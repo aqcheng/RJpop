@@ -1,0 +1,11 @@
+{
+    "out_path": "/scratch/gpfs/ANDREASB/aqc/data/LVK_processed",
+    "gwtc_injs_in_path": "/scratch/gpfs/ANDREASB/LVK_DATA/injections/19500052/mixture-semi_o1_o2-real_o3_o4a_o4b-polar_spins_20260410130052UTC-clipped.hdf",
+    "lvk_pe_in_paths": [
+        "/scratch/gpfs/ANDREASB/LVK_DATA/posteriors/8177023", 
+        "/scratch/gpfs/ANDREASB/LVK_DATA/posteriors/17602505",
+        "/scratch/gpfs/ANDREASB/LVK_DATA/posteriors/20348005",
+        "/scratch/gpfs/ANDREASB/LVK_DATA/posteriors/20348006"
+    ],
+    "o4b-astro_path": "/scratch/gpfs/ANDREASB/LVK_DATA/populations/o4b-astro"
+}

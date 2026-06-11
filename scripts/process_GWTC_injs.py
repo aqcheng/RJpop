@@ -1,17 +1,63 @@
+import argparse
+import os
+import sys
+
 import h5py
 import numpy as np
+from pathlib import Path
 
-from priors import chi_effective_prior_from_isotropic_spins
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rjpop'))
+from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
+from rjpop.load_config import load_config
 
-inpath = '/scratch/gpfs/ANDREASB/ct6081/LVK_DATA/injections/16740128/mixture-semi_o1_o2-real_o3_o4a-polar_spins_20250503134659UTC.hdf'  # replace with your path
-outpath = '/scratch/gpfs/ANDREASB/aqc/data/LVK_DATA/processed/o1_o2_o3_o4a_injs.npz'  # replace with your desired output path
-
-far_thr = 1 #1/yr
-rho_thr = 10
+FAR_THR = 1   # 1/yr
+RHO_THR = 10
 
 if __name__ == '__main__':
-    print(f'Processing injections from {inpath}')
-    with h5py.File(inpath, 'r') as f_:
+    cfg = load_config()
+
+    parser = argparse.ArgumentParser(
+        description='Pre-process combined injection campaign, assuming polar spins.'
+    )
+    parser.add_argument(
+        '--in_path', '-in_path', type=str,
+        default=cfg.get('gwtc_injs_in_path'),
+        help='Path to the injection HDF file. '
+             'Default: gwtc_injs_in_path in ~/.rjpop_config.json',
+    )
+    parser.add_argument(
+        '--out_path', '-out_path', type=str,
+        default=cfg.get('out_path'),
+        help='Output directory. Default: out_path in ~/.rjpop_config.json',
+    )
+    parser.add_argument(
+        '--far_thr', type=float, default=FAR_THR,
+        help=f'FAR threshold in 1/yr for detection cut (default: {FAR_THR})',
+    )
+    parser.add_argument(
+        '--rho_thr', type=float, default=RHO_THR,
+        help=f'Optimal SNR threshold for detection cut (default: {RHO_THR})',
+    )
+    args = parser.parse_args()
+
+    if args.in_path is None:
+        parser.error("--in_path is required (or set 'gwtc_injs_in_path' in ~/.rjpop_config.json)")
+    if args.out_path is None:
+        parser.error("--out_path is required (or set 'out_path' in ~/.rjpop_config.json)")
+
+    os.makedirs(args.out_path, exist_ok=True)
+
+    # get prefix from .md file
+    prefix = ""
+    for fn in os.listdir(os.path.dirname(args.in_path)):
+        if fn.endswith('.md'):
+            prefix = fn.split("_")[1] + "_"
+            break
+    
+    outfile = os.path.join(args.out_path, f'{prefix}injs.npz')
+
+    print(f'Processing injections from {args.in_path}')
+    with h5py.File(args.in_path, 'r') as f_:
         f = f_['events']
 
         injs = {}
@@ -35,8 +81,8 @@ if __name__ == '__main__':
         injs['chi_eff'] = chi_eff
 
         sampling_pdf = np.exp(f['lnpdraw_mass1_source_mass2_source_redshift_spin1_magnitude_spin1_polar_angle_spin1_azimuthal_angle_spin2_magnitude_spin2_polar_angle_spin2_azimuthal_angle'][()])
-        sampling_pdf *= m1 # m1, m2 -> m1, q 
-        sampling_pdf /= (1/(4*np.pi))**2 * np.sin(theta1) * np.sin(theta2) # uniform prior on spins
+        sampling_pdf *= m1  # m1, m2 -> m1, q
+        sampling_pdf /= (1/(4*np.pi))**2 * np.sin(theta1) * np.sin(theta2)  # uniform prior on spins
         sampling_pdf *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=1.0)
         injs['prior'] = sampling_pdf
 
@@ -48,13 +94,13 @@ if __name__ == '__main__':
         injs['far'] = far_min
         injs['rho'] = rho_opt
 
-        mask = (rho_opt >= rho_thr) | (far_min <= far_thr)
+        mask = (rho_opt >= args.rho_thr) | (far_min <= args.far_thr)
 
-        injs = {k : v[mask] for k, v in injs.items()} # save only detected events
+        injs = {k: v[mask] for k, v in injs.items()}  # save only detected events
 
         injs['total_generated'] = f_.attrs['total_generated']
-        injs['Tobs_yr'] = f_.attrs['total_analysis_time'] / 3.1557e7 # in years
+        injs['Tobs_yr'] = f_.attrs['total_analysis_time'] / 3.1557e7  # in years
 
-        # save everything
-        np.savez(outpath, **injs)
-        print('Saved the following keys: ', injs.keys())
+        np.savez(outfile, **injs)
+        print(f'Saved to {outfile}')
+        print('Keys: ', list(injs.keys()))

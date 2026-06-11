@@ -639,7 +639,7 @@ def get_bad_leaves(feats, groups, nleaves_max, min_sep=1):
 # ---------------------------
 
 
-def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
+def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False, group_chunk_size=None):
     """Compute the per-group log-likelihood for the hierarchical population model.
 
     Implements the hierarchical likelihood with selection effects (see Eq. 5 of
@@ -668,6 +668,13 @@ def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
         Contains parameter arrays (shape (ninjs,)), `'prior'` (shape (ninjs,)),
         weights `'w'` (shape (nfound,)), and metadata like `'total_generated'`.
         Also uses module-level `TOBS` for the observing time.
+    group_chunk_size : int or None, optional
+        If set, evaluate the likelihood in batches of at most this many groups
+        instead of all `ngroups` at once. Every working array scales linearly
+        with the number of groups, so this caps peak GPU memory ~linearly in
+        `group_chunk_size` at identical FLOPs and bit-for-bit identical results
+        (groups are independent). `None` (default) or a value >= `ngroups`
+        evaluates all groups in a single pass.
 
     Returns
     -------
@@ -693,6 +700,36 @@ def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
 
     ngroups = groups[-1].shape[0]  # since global groups is just range(ngroups)
 
+    if group_chunk_size and 0 < group_chunk_size < ngroups:
+        # Evaluate the batch in sub-batches of groups to cap peak GPU memory.
+        # Each leaf belongs to exactly one group and groups are independent, so
+        # partitioning groups across chunks gives a bit-for-bit identical result.
+        logl = xp.empty(ngroups, dtype=xp.float64)
+        for start in range(0, ngroups, group_chunk_size):
+            end = min(start + group_chunk_size, ngroups)
+            hp_chunk, groups_chunk = [], []
+            for branch_hp, branch_grp in zip(hyperparams, groups):
+                mask = (branch_grp >= start) & (branch_grp < end)
+                hp_chunk.append(branch_hp[mask])
+                groups_chunk.append(branch_grp[mask] - start)  # remap to chunk-local ids
+            logl[start:end] = _loglike_chunk(
+                hp_chunk, groups_chunk, end - start, data, injections, min_sep, debug
+            )
+        return utils.to_numpy(logl)
+
+    return utils.to_numpy(
+        _loglike_chunk(hyperparams, groups, ngroups, data, injections, min_sep, debug)
+    )
+
+
+def _loglike_chunk(hyperparams, groups, ngroups, data, injections, min_sep=1, debug=False):
+    """Single-pass evaluation of the hierarchical likelihood for `ngroups` groups.
+
+    Holds the full computation; `loglike` is a thin wrapper that casts dtypes and
+    optionally chunks over groups. `hyperparams`/`groups` are already cast and (when
+    chunking) sliced to the chunk. Returns an `xp` array of shape (ngroups,); the
+    caller converts it to NumPy.
+    """
     data_flat = {k: data[k].ravel() for k in data}
     nevs, nsamples = data["redshift"].shape
     ninjs = injections["redshift"].shape[0]
@@ -891,8 +928,7 @@ def loglike(hyperparams, groups, data, injections, min_sep=1, debug=False):
         if debug:
             print("fraction of groups masked out by min sep:", len(bad_groups) / ngroups)
 
-    return utils.to_numpy(xp.clip(logl, -INF, None))
-    # output needs to be a numpy array
+    return xp.clip(logl, -INF, None)  # caller (loglike) converts to a numpy array
 
 
 # rate post-processing

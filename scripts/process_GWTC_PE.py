@@ -1,8 +1,8 @@
 # python -u process_GWTC_PE.py --in_path /work/yifanwang/birefringence/lvksamples /work/aqc/data/GWTC_data/GWTC3 /work/aqc/data/GWTC_data/GWTC2.1 --out_path /work/aqc/data/GWTC_data/processed --target_nsamp 9000
 
-# -------------------------
-# ----> GWTC3 helpers <----
-# -------------------------
+# # -------------------------
+# # ----> GWTC3 helpers <----
+# # -------------------------
 
 GWTC3_BBHs = """
 GW150914_095045
@@ -164,18 +164,6 @@ GW240107_013215
 GW240109_050431
 """.split()  # exclude NSBHs GW230518_125908 and GW230529_181500
 
-# GWTC3_BBHs = """
-# GW150914_095045
-# GW151012_095443
-# GW151226_033853
-# """.split()
-
-# GWTC4_BBHs = """
-# GW231231_154016
-# GW240104_164932
-# GW240107_013215
-# """.split()
-
 default_params = [
     "mass_1_source",
     "mass_2_source",
@@ -190,13 +178,15 @@ if __name__ == "__main__":
     import json
     import os
     import re
-    import sys
 
     import h5py
     import numpy as np
 
     from astropy.cosmology import Planck15
     from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
+    from rjpop.load_config import load_config
+
+    cfg = load_config()
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -208,22 +198,49 @@ if __name__ == "__main__":
         help="Parameters to get samples for.",
     )
     parser.add_argument(
-        "-in_path",
-        "--in_path",
+        "-in_paths",
+        "--in_paths",
         type=str,
         nargs="+",
-        help="Path(s) to directories with LVK PE samples",
+        default=cfg.get('lvk_pe_in_paths'),
+        help="Path(s) to directories with LVK PE samples. "
+             "Default: lvk_pe_in_paths in ~/.rjpop_config.json",
     )
-    parser.add_argument("-out_path", "--out_path", type=str, default=None, help="Output directory")
     parser.add_argument(
-        "-catalogs",
-        "--catalogs",
+        "--GWTC3_BBHs_path",
         type=str,
-        nargs="+",
-        choices=["GWTC2p1", "GWTC3", "GWTC4"],
-        default=["GWTC2p1", "GWTC3", "GWTC4"],
-        help="Catalogs to use",
+        default=None,
+        help="Path to GWTC3 BBHs file. "
+             "Default: None",
     )
+    parser.add_argument(
+        "--GWTC4_BBHs_path",
+        type=str,
+        default=os.path.join(cfg.get('o4b-astro_path'), 'Event_list', 'GWTC4.1_BBH.txt'),
+        help="Path to GWTC4 BBHs file. "
+             "Default: [o4b-astro_path]/Event_list/GWTC4.1_BBH.txt",
+    )
+    parser.add_argument(
+        "--GWTC5_BBHs_path",
+        type=str,
+        default=os.path.join(cfg.get('o4b-astro_path'), 'Event_list', 'GWTC5_BBH.txt'),
+        help="Path to GWTC5 BBHs file. "
+             "Default: [o4b-astro_path]/Event_list/GWTC5_BBH.txt",
+    )
+    parser.add_argument(
+        "-out_path", "--out_path", type=str,
+        default=cfg.get('out_path'),
+        help="Output directory. Default: out_path in ~/.rjpop_config.json",
+    )
+    # parser.add_argument(
+    #     "-catalogs",
+    #     "--catalogs",
+    #     type=str,
+    #     nargs="+",
+    #     choices=["GWTC2p1", "GWTC3", "GWTC4"],
+    #     default=["GWTC2p1", "GWTC3", "GWTC4"],
+    #     help="Catalogs to use",
+    # )
     parser.add_argument(
         "-target_nsamp",
         "--target_nsamp",
@@ -237,79 +254,114 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     priors, PE_samples = {param: [] for param in args.params}, {param: [] for param in args.params}
+    PE_samples["event_names"] = []
+
+    BBHs_dict = {"GWTC3": GWTC3_BBHs, "GWTC4": GWTC4_BBHs}
+    if args.GWTC3_BBHs_path is not None:
+        if os.path.exists(args.GWTC3_BBHs_path):
+            with open(args.GWTC3_BBHs_path, 'r') as f:
+                print(f"Fetching GWTC3 BBHs list from {args.GWTC3_BBHs_path}")
+                BBHs_dict["GWTC3"] = f.read().splitlines()
+    if args.GWTC4_BBHs_path is not None:
+        if os.path.exists(args.GWTC4_BBHs_path):
+            with open(args.GWTC4_BBHs_path, 'r') as f:
+                print(f"Fetching GWTC4 BBHs list from {args.GWTC4_BBHs_path}")
+                BBHs_dict["GWTC4"] = f.read().splitlines()
+    if args.GWTC5_BBHs_path is not None:
+        if os.path.exists(args.GWTC5_BBHs_path):
+            with open(args.GWTC5_BBHs_path, 'r') as f:
+                print(f"Fetching GWTC5 BBHs list from {args.GWTC5_BBHs_path}")
+                BBHs_dict["GWTC5"] = f.read().splitlines()
 
     os.makedirs(args.out_path, exist_ok=True)
 
-    wf_per_event = []
-    for catname in sorted(args.catalogs):
-        print(f"Processing catalog {catname}")
-        if catname == "GWTC4":
-            eventnames = GWTC4_BBHs
-            fn_suffix = ".hdf5"
-        else:
-            eventnames = GWTC3_BBHs
-            fn_suffix = "_cosmo.h5"  # get uniform in comoving volume
-
+    wf_per_event = {}
+    catnames = set()
+    for dirname in args.in_paths:
+        print(f"Processing {dirname}")
         if args.save_prior:
             prior_saved = False
         else:
             prior_saved = True
 
-        for path in args.in_path:
-            # look for files corresponding to the catalog
-            for fn in sorted(os.listdir(path)):
-                if (
-                    fn.startswith(f"IGWN-{catname}")
-                    and "PEDataRelease" in fn
-                    and fn.endswith(fn_suffix)
-                ):
-                    event_name = "GW" + "_".join(re.split("[_-]+", fn.split("-GW")[2])[:2])
-                    if event_name in eventnames:
-                        print(f"    {event_name}")
-                        with h5py.File(os.path.join(path, fn), "r") as f:
-                            if catname == "GWTC4":
-                                if any("NRSur" in k for k in f.keys()):
-                                    key = [k for k in f.keys() if "NRSur" in k][0]
-                                else:
-                                    key = [k for k in f.keys() if "Mixed" in k][0]
-                            else:
-                                key = [k for k in f.keys() if "IMRPhenom" in k][0]
-                            wf_per_event.append([event_name, key.split(":")[-1]])
+        for fn in sorted(os.listdir(dirname)):
+            if not((fn.endswith("_cosmo.h5") or fn.endswith(".hdf5")) and "PEDataRelease" in fn):
+                continue
 
-                            nsamps_tot = f[key]["posterior_samples"].size
-                            if nsamps_tot > args.target_nsamp:
-                                inds = np.sort(
-                                    np.random.choice(nsamps_tot, args.target_nsamp, replace=False)
-                                )
-                            else:
-                                inds = np.arange(nsamps_tot)
+            print(f"   {fn}")
+            
+            catname = fn.split("-")[1][:5]
+            event_name = "GW" + "_".join(re.split("[_-]+", fn.split("-GW")[2])[:2])
 
-                            for param in args.params:
-                                PE_samples[param].append(f[key]["posterior_samples"][inds, param])
+            if catname in BBHs_dict:
+                if event_name not in BBHs_dict[catname]:
+                    print(f"   skipping {event_name}, not confidently a BBH")
+                    continue
 
-                            if not prior_saved:
-                                phenom_key = [k for k in f.keys() if "IMRPhenom" in k][0]
-                                try:  # save a prior dictionary
-                                    priordict = {
-                                        key: f[phenom_key]["priors"]["analytic"][key][0].decode(
-                                            "utf8"
-                                        )
-                                        for key in f[phenom_key]["priors"]["analytic"]
-                                    }
-                                    if priordict:
-                                        prior_fn = os.path.join(
-                                            args.out_path, f"{catname}_prior.json"
-                                        )
-                                        with open(prior_fn, "w") as pf:
-                                            json.dump(priordict, pf)
-                                        prior_saved = True
-                                        print(f"    {catname} prior saved from event {event_name}")
-                                except Exception:
-                                    pass
+            with h5py.File(os.path.join(dirname, fn), "r") as f:
+                if any("NSBH" in k for k in f.keys()) or any("Tidal" in k for k in f.keys()):
+                    print(f"   skipping {event_name}, not confidently a BBH")
+                    continue
+
+                if catname == "GWTC3":
+                    IMR_key = [k for k in f.keys() if "IMRPhenom" in k][0]
+                    if 'C01:Mixed' in f.keys():
+                        mixed_nsamps = f['C01:Mixed']['posterior_samples'].shape[0]
+                        IMR_nsamps = f[IMR_key]['posterior_samples'].shape[0]
+                        key = 'C01:Mixed' if mixed_nsamps > IMR_nsamps else IMR_key
+                    else:
+                        key = IMR_key
+                else:
+                    if any("NRSur" in k for k in f.keys()):
+                        key = [k for k in f.keys() if "NRSur" in k][0]
+                    elif any("Mixed" in k for k in f.keys()):
+                        key = [k for k in f.keys() if "Mixed" in k][0]
+                    elif any("IMRPhenomXPHM-SpinTaylor" in k for k in f.keys()):
+                        key = [k for k in f.keys() if "IMRPhenomXPHM-SpinTaylor" in k][0] # O4b events
+                    else:
+                        raise ValueError(f"Could not find a waveform model in {fn}. Available waveforms: {list(f.keys())}")
+                
+                # check if it's a BBH
+                if_BBH_samples = (
+                    np.asarray(f[key]["posterior_samples"][:, "mass_1_source"] > 3)
+                    & np.asarray(f[key]["posterior_samples"][:, "mass_2_source"] > 3)
+                )
+                if np.mean(if_BBH_samples) < 0.99:
+                    print(f"   skipping {event_name}, not confidently a BBH")
+                    continue
+                
+                nsamps_tot = f[key]["posterior_samples"].size
+
+                wf_per_event[event_name] = [key.split(":")[-1], nsamps_tot] # record waveform and number of samples
+                PE_samples["event_names"].append(event_name)
+                catnames.add(catname[-1])
+
+                for param in args.params:
+                    PE_samples[param].append(f[key]["posterior_samples"][:, param])
+
+                if not prior_saved:
+                    phenom_key = [k for k in f.keys() if "IMRPhenom" in k][0]
+                    try:  # save a prior dictionary
+                        priordict = {
+                            key: f[phenom_key]["priors"]["analytic"][key][0].decode(
+                                "utf8"
+                            )
+                            for key in f[phenom_key]["priors"]["analytic"]
+                        }
+                        if priordict:
+                            prior_fn = os.path.join(
+                                args.out_path, f"{catname}_prior.json"
+                            )
+                            with open(prior_fn, "w") as pf:
+                                json.dump(priordict, pf)
+                            prior_saved = True
+                            print(f"    {catname} prior saved from event {event_name}")
+                    except Exception:
+                        pass
 
     # stack samples
     # get minimum n samples
-    nsamps = min([len(i) for i in PE_samples[args.params[0]]])
+    nsamps = min([len(i) for i in PE_samples[args.params[0]]] + [args.target_nsamp])
     print(f"Using {nsamps} samples for each event (target: {args.target_nsamp})")
 
     # downsample each event
@@ -338,8 +390,9 @@ if __name__ == "__main__":
     PE_samples["prior"] = prior
 
     # save
-    prefix = "GWTC" + "_".join([catname.split("GWTC")[-1] for catname in args.catalogs])
-    np.savez(os.path.join(args.out_path, prefix + "_PE_samples.npz"), **PE_samples)
+    prefix = "GWTC" + "".join(sorted(catnames))
+    np.savez(os.path.join(args.out_path, f"{prefix}_PE_samples.npz"), **PE_samples)
 
     # save table of event names, keys
-    np.savetxt(os.path.join(args.out_path, prefix + "_waveforms.txt"), wf_per_event, fmt="%s")
+    wf_per_event_list = [(event, wf_per_event[event][0], wf_per_event[event][1]) for event in sorted(PE_samples["event_names"])]
+    np.savetxt(os.path.join(args.out_path, f"{prefix}_event_waveforms.txt"), wf_per_event_list, fmt="%s")

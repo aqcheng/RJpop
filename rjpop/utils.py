@@ -7,6 +7,9 @@ from eryn.backends import Backend
 from eryn.ensemble import EnsembleSampler
 from eryn.utils.utility import get_integrated_act
 from scipy.optimize import curve_fit
+
+import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "rjpop"))
 from xp import xp
 
 ### MISC UTILS

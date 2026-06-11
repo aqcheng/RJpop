@@ -1,18 +1,49 @@
+import argparse
+import os
+import sys
+
 import h5py
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rjpop'))
 from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
+from rjpop.load_config import load_config
 
-inpath = '/work/aqc/data/GWTC_data/LVK_injections/endo3_bbhpop-LIGO-T2100113-v12.hdf5'  # replace with your path
-outpath = '/work/aqc/data/GWTC_data/processed/o3_injs.npz'  # replace with your desired output path
-prefix = ''
-
-# far_thr = 1 #1/yr
-rho_thr = 9
+RHO_THR = 9
 
 if __name__ == '__main__':
-    print(f'Processing injections from {inpath}')
-    with h5py.File(inpath, 'r') as f_:
+    cfg = load_config()
+
+    parser = argparse.ArgumentParser(
+        description='Preprocess O3-only injection campaign into NPZ format.'
+    )
+    parser.add_argument(
+        '--in_path', '-in_path', type=str,
+        default=cfg.get('o3_injs_in_path'),
+        help='Path to the O3 injection HDF file. '
+             'Default: o3_injs_in_path in ~/.rjpop_config.json',
+    )
+    parser.add_argument(
+        '--out_path', '-out_path', type=str,
+        default=cfg.get('out_path'),
+        help='Output directory. Default: out_path in ~/.rjpop_config.json',
+    )
+    parser.add_argument(
+        '--rho_thr', type=float, default=RHO_THR,
+        help=f'Optimal SNR threshold for detection cut (default: {RHO_THR})',
+    )
+    args = parser.parse_args()
+
+    if args.in_path is None:
+        parser.error("--in_path is required (or set 'o3_injs_in_path' in ~/.rjpop_config.json)")
+    if args.out_path is None:
+        parser.error("--out_path is required (or set 'out_path' in ~/.rjpop_config.json)")
+
+    os.makedirs(args.out_path, exist_ok=True)
+    outfile = os.path.join(args.out_path, 'o3_injs.npz')
+
+    print(f'Processing injections from {args.in_path}')
+    with h5py.File(args.in_path, 'r') as f_:
         f = f_['injections']
 
         injs = {}
@@ -28,16 +59,16 @@ if __name__ == '__main__':
 
         injs['redshift'] = f['redshift'][()]
 
-        a1x, a2x = f['spin1x'][()], f['spin2x'][()]
-        a1y, a2y = f['spin1y'][()], f['spin2y'][()]
         a1z, a2z = f['spin1z'][()], f['spin2z'][()]
         chi_eff = (m1 * a1z + m2 * a2z) / (m1 + m2)
 
         injs['chi_eff'] = chi_eff
 
-        sampling_pdf = f['mass1_source_mass2_source_sampling_pdf'][()] * \
-                       f['redshift_sampling_pdf'][()]  # this is P(m1, m2, z) -- want to convert to P(m1, q, z, chi_eff)
-        sampling_pdf *= m1 # m1, m2 -> m1, q
+        sampling_pdf = (
+            f['mass1_source_mass2_source_sampling_pdf'][()]
+            * f['redshift_sampling_pdf'][()]  # P(m1, m2, z) -> convert to P(m1, q, z, chi_eff)
+        )
+        sampling_pdf *= m1  # m1, m2 -> m1, q
         sampling_pdf *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=0.998)
         injs['prior'] = sampling_pdf
 
@@ -49,16 +80,13 @@ if __name__ == '__main__':
         injs['far'] = far_min
         injs['rho'] = rho_opt
 
-        # run = np.array([int(str(i[-1])) for i in np.char.decode(f['name'][()])])
-        # mask = np.where(run==3, far_min <= far_thr, rho_opt >= rho_thr)
-        # I'm running on Sylvia's injections -- just do SNR cutoff
-        mask = rho_opt >= rho_thr
+        mask = rho_opt >= args.rho_thr
 
-        injs = {k : v[mask] for k, v in injs.items()} # save only detected events
+        injs = {k: v[mask] for k, v in injs.items()}  # save only detected events
 
         injs['total_generated'] = f_.attrs['total_generated']
-        injs['Tobs_yr'] = f_.attrs['analysis_time_s'] / 3.1557e7 # in years
+        injs['Tobs_yr'] = f_.attrs['analysis_time_s'] / 3.1557e7  # in years
 
-        # save everything
-        np.savez(outpath, **injs)
-        print('Saved the following keys: ', injs.keys())
+        np.savez(outfile, **injs)
+        print(f'Saved to {outfile}')
+        print('Keys: ', list(injs.keys()))

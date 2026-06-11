@@ -7,26 +7,6 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
 from popsummary.popresult import PopulationResult
 
-# Optional LVK plotting helpers (from the data release figure_scripts directory).
-# Call setup_lvk_plot_funcs(lvk_res_path) before using setup_and_plot_GWTC4.
-pf = None
-
-
-def setup_lvk_plot_funcs(lvk_res_path):
-    """Load plot_funcs_bbh_mass from the LVK data release figure_scripts directory."""
-    global pf
-    import os
-    import sys
-
-    sys.path.append(os.path.join(lvk_res_path, "figure_scripts"))
-    try:
-        import plot_funcs_bbh_mass as _pf
-
-        pf = _pf
-    except ImportError as e:
-        print(f"Warning: could not import LVK plot functions from {lvk_res_path}: {e}")
-
-
 ### PLOTTING UTILS
 
 param_latex = {
@@ -107,25 +87,27 @@ def plot_ppds(
         percs = [dist, 50, 100 - dist]
         low, med, high = np.nanpercentile(ppds, percs, axis=0)
 
-        if swap_xy:
-            ax.fill_betweenx(x, low, high, color=color, alpha=fill_alpha, label=label)
-        else:
-            ax.fill_between(x, low, high, color=color, alpha=fill_alpha, label=label)
-            
-        if swap_xy:
-            if lw:
-                ax.plot(med, x, color=color, lw=lw, ls=ls)
-            if secondary_lw:
-                ax.plot(low, x, color=color, lw=secondary_lw, ls="--")
+        if fill_alpha: # plot fill
+            if swap_xy:
+                ax.fill_betweenx(x, low, high, color=color, alpha=fill_alpha, label=label)
+            else:
+                ax.fill_between(x, low, high, color=color, alpha=fill_alpha, label=label)
+            label = None # don't label lines
+        
+        if lw: # plot median
+            if swap_xy:
+                ax.plot(med, x, color=color, lw=lw, ls=ls, label=label)
+            else:
+                ax.plot(x, med, color=color, lw=lw, ls=ls, label=label)
+            label = None
+        
+        if secondary_lw: # plot percentiles
+            if swap_xy:
+                ax.plot(low, x, color=color, lw=secondary_lw, ls="--", label=label)
                 ax.plot(high, x, color=color, lw=secondary_lw, ls="--")
-        else:
-            if lw:
-                ax.plot(x, med, color=color, lw=lw, ls=ls)
-            if secondary_lw:
-                ax.plot(x, low, color=color, lw=secondary_lw, ls="--")
+            else:
+                ax.plot(x, low, color=color, lw=secondary_lw, ls="--", label=label)
                 ax.plot(x, high, color=color, lw=secondary_lw, ls="--")
-        if label is not None:
-            label = textsc_ify(label)
 
 
 def plot_chains(
@@ -387,95 +369,122 @@ set2 = [Set2[0], Set2[2], Set2[3], Set2[1]] + Set2[4:]
 # hard coded in - for consistency with NPLNP colors
 skewt_colors = [set2[0], set2[2], set2[1], set2[3]]
 
+#####################################################################
+### popsummary helpers - mostly lifted from GWTC-4 plotting code, ###
+### https://zenodo.org/records/16911563                           ###
+#####################################################################
 
-def setup_and_plot_GWTC4(
+def get_params(dataset, param, rate = True):
+    # lifted from GWTC-4 plotting code, https://zenodo.org/records/16911563
+    param = [param] if not isinstance(param, list) else param
+    for p in param:
+        dat = dataset.get_rates_on_grids(p)
+        x = dat[0][0]
+        pdf = dat[1]
+    if rate:
+        lamb = dataset.get_hyperparameter_samples(hyperparameters = 'lamb')
+        pdf = pdf * (1 + 0.2)**lamb.reshape(-1,1)
+    return x, pdf
+
+def setup_mass_plot(ax, m="m_1", xrange=(2,100), yrange=(1e-3,40), yscale = 'log', xscale = 'linear', label_kwargs = {}, grid_kwargs={}):
+    ax.set_yscale(yscale)
+    ax.set_xscale(xscale)
+    ax.set_ylim(*yrange)
+    ax.set_xlim(*xrange)
+    ax.set_xlabel(rf"${m} \left[ \mathrm{{M}}_\odot \right]$", **label_kwargs)
+    ax.set_ylabel(rf'$\mathrm{{d}}\mathcal{{R}}/\mathrm{{d}}{m} \left[ \mathrm{{Gpc}}^{{-3}} \, \mathrm{{yr}}^{{-1}} \, \mathrm{{M}}_\odot^{{-1}} \right]$', **label_kwargs)
+    ax.grid(**grid_kwargs)
+
+def setup_mass_ratio_plot(ax, xrange=(0,1), yrange=(4e-2,3e2), yscale = 'log', xscale = 'linear', label_kwargs = {}, grid_kwargs={}):
+    ax.set_yscale(yscale)
+    ax.set_xscale(xscale)
+    ax.set_ylim(*yrange)
+    ax.set_xlim(*xrange)
+    ax.set_xlabel(r"$q$", **label_kwargs)
+    ax.set_ylabel(r'$\mathrm{d}\mathcal{R}/\mathrm{d}q \left[ \mathrm{Gpc}^{-3} \, \mathrm{yr}^{-1} \right]$', **label_kwargs)
+    ax.grid(**grid_kwargs)
+
+#####################################################################
+
+def setup_and_plot_GWTC(
     param_name,
     ax,
     res: PopulationResult | None = None,
     spin_res: PopulationResult | None = None,
+    catalog: str | None = None,
     label=True,
-    pf_kwargs=None,
     CI_kwargs=None,
 ):
-
-    if pf_kwargs is None:
-        pf_kwargs = {}
 
     x, y = None, None
     label_default = None
 
     if param_name == "chi_eff":
         if spin_res is not None:
-            x, y = spin_res.get_rates_on_grids("Effective inspiral spin")
-            x, y = x[0], y.T  # bruh
-            label_default = "LVK skew-normal"
+            if catalog == "GWTC4":
+                x, y = spin_res.get_rates_on_grids("Effective inspiral spin")
+                x, y = x[0], y.T  # bruh
+                label_default = '$\\textsc{LVK skew-normal (gwtc-4)}$'
+            elif catalog == "GWTC5":
+                x, y = spin_res.get_rates_on_grids("chi_eff")
+                label_default = '$\\textsc{LVK bivariate skew-normal (gwtc-5)}$'
         ax.grid(color="silver", alpha=0.5, ls=":", zorder=0)
         ax.set_xlabel(r"$\chi_\mathrm{eff}$")
         ax.set_ylabel(r"$p(\chi_\mathrm{eff})$")
         ax.set_ylim(0, 5.5)
         ax.set_xlim(-0.35, 0.65)
-
-    elif param_name == "mass_1_source":
-        if res is not None and pf is not None:
-            x, y = pf.get_params(res, "mass_1")
-            if "BSpline" in res.fname:
-                label_default = r"$\textsc{LVK Spline}$"
-            else:
-                label_default = r"$\textsc{LVK BP2P}$"
-        if pf is not None:
-            pf.setup_mass_plot(ax, xrange=(2, 100), yrange=(1e-3, 40), **pf_kwargs)
-
-    elif param_name == "mass_2_source":
-        if pf is not None:
-            pf.setup_mass_plot(ax, xrange=(2, 100), yrange=(1e-3, 40), **pf_kwargs)
-            ylabel = ax.get_ylabel()
-            ax.set_ylabel(ylabel.replace("m_1", "m_2"))
-        ax.set_xlabel(r"$m_2 \,\left[ \mathrm{M}_\odot \right]$")
-        # don't plot LVK results
-        return
-
-    elif param_name == "mass_ratio":
-        if res is not None and pf is not None:
-            if "BSpline" in res.fname:
-                x, y = pf.get_params(res, "rate_vs_mass_ratio_at_z0-2", rate=False)
-                label_default = r"$\textsc{LVK Spline}$"
-            else:
-                x, y = pf.get_params(res, "mass_ratio")
-                label_default = r"$\textsc{LVK BP2P}$"
-        if pf is not None:
-            pf.setup_mass_ratio_plot(ax, **pf_kwargs)
-
-    elif param_name == "redshift":
-        if res is not None:
-            x, y = res.get_rates_on_grids("redshift")
-            x = x[0]  # bro why did the LVK code it like this
-            label_default = r"$\textsc{LVK}$"
-
-        ax.set_yscale("log")
-        ax.set_ylim([8, 3e3])
-        ax.set_xlim([0, 1.5])
-
-        ax.set_xlabel("$z$")
-        ax.set_ylabel("$\\mathcal{R}(z)$ [Gpc${}^{-3}$ yr${}^{-1}$]")
-
+    
     else:
-        print(f"Unrecognized plotting parameter {param_name}")
-        return
+        if catalog == "GWTC4":
+            label_default = r"$\textsc{LVK BP2P (gwtc-4)}$"
+        elif catalog == "GWTC5":
+            label_default = r"$\textsc{LVK Default (gwtc-5)}$"
+
+        if param_name == "mass_1_source":
+            if res is not None:
+                x, y = get_params(res, "mass_1")
+                x = x.ravel()
+            setup_mass_plot(ax)
+
+        elif param_name == "mass_2_source":
+            setup_mass_plot(ax, m="m_2")
+            # don't plot LVK results
+            return
+
+        elif param_name == "mass_ratio":
+            if res is not None:
+                x, y = get_params(res, "mass_ratio")
+                x = x.ravel()
+            setup_mass_ratio_plot(ax)
+
+        elif param_name == "redshift":
+            if res is not None:
+                x, y = res.get_rates_on_grids("redshift")
+                x = x.ravel()
+
+            ax.set_yscale("log")
+            ax.set_ylim([8, 3e3])
+            ax.set_xlim([0, 1.5])
+            ax.set_xlabel("$z$")
+            ax.set_ylabel("$\\mathcal{R}(z)$ [Gpc${}^{-3}$ yr${}^{-1}$]")
+
+        else:
+            print(f"Unrecognized plotting parameter {param_name}")
+            return
 
     if not isinstance(label, str):
         label = label_default if label else None
 
-    if x is not None and y is not None and pf is not None:
+    if x is not None and y is not None:
         line_default_kwargs = dict(
             color="k",
-            median=False,
-            fill=False,
-            secondary_ls="--",
-            lw=0.8,
+            CI=90,
             label=label,
-            fill_alpha=0.3,
+            fill_alpha=0,
+            lw=0,
+            secondary_lw=0.8
         )
         if CI_kwargs:
             line_default_kwargs.update(CI_kwargs)
 
-        pf.plot_90CI(ax, x, y, **line_default_kwargs)
+        plot_ppds(ax, x, y, **line_default_kwargs)
