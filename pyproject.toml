@@ -18,6 +18,7 @@ dependencies = [
     "eryn",
     "popsummary",
     "cupy-cuda13x",
+    "KDEpy",
 ]
 
 [tool.hatch.build.targets.wheel]

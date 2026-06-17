@@ -629,3 +629,148 @@ def plot_all_param_ppds(
         fig.savefig(savepath, bbox_inches="tight")
         plt.close(fig)
     return fig
+
+
+def plot_ev_contour(
+    param_x, param_y, x_samples, y_samples, weights=None, CI=90,
+    ax=None, xlim=None, ylim=None, **contour_kwargs,
+):
+    """Plot a single (population-reweighted) PE posterior contour for one event.
+
+    A weighted Gaussian KDE is fit to the standardized ``(param_x, param_y)``
+    samples, and the ``CI``% highest-density contour is drawn.
+
+    Parameters
+    ----------
+    param_x, param_y : str
+        Parameter names (used only for axis labels via ``param_latex``).
+    x_samples, y_samples : array-like
+        The event's PE posterior samples for each parameter, shape (nsamples,).
+    weights : array-like or None
+        Per-sample weights (e.g. population-reweighting weights). If None, uniform.
+    CI : float
+        Credible level (percent) enclosed by the drawn contour.
+    ax : matplotlib axis or None
+    xlim, ylim : tuple or None
+        Axis limits.
+    **contour_kwargs
+        Forwarded to ``ax.contour`` (e.g. ``colors``, ``zorder``).
+    """
+    from KDEpy import FFTKDE
+
+    x_samples = np.asarray(x_samples, dtype=float)
+    y_samples = np.asarray(y_samples, dtype=float)
+    if weights is None:
+        weights = np.ones(x_samples.shape[0])
+    else:
+        weights = np.nan_to_num(np.asarray(weights, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if weights.sum() <= 0:
+        weights = np.ones(x_samples.shape[0])
+    weights = weights / weights.sum()
+
+    samples = np.stack([x_samples, y_samples], axis=-1)
+    mean = np.average(samples, weights=weights, axis=0)
+    std = np.sqrt(np.average((samples - mean) ** 2, weights=weights, axis=0))
+    samples_normed = (samples - mean) / std
+
+    Neff = 1.0 / np.sum(weights ** 2)
+    scott_bw = Neff ** (-1 / (2 + 4))  # Scott's rule in 2D (standardized data)
+    grid_pts = 512
+    kde = FFTKDE(kernel="gaussian", bw=scott_bw).fit(samples_normed, weights=weights)
+    grid, ZZ_flat = kde.evaluate(grid_pts)
+    ZZ = ZZ_flat.reshape(grid_pts, grid_pts).T
+    x = np.unique(grid[:, 0]) * std[0] + mean[0]
+    y = np.unique(grid[:, 1]) * std[1] + mean[1]
+
+    # highest-density level enclosing CI% of the probability mass
+    flat_sorted = np.sort(ZZ.ravel())[::-1]
+    cumsum = np.cumsum(flat_sorted) / flat_sorted.sum()
+    level = flat_sorted[np.searchsorted(cumsum, CI / 100)]
+
+    if ax is None:
+        _, ax = plt.subplots()
+    contour_kwargs = dict(linewidths=0.35) | contour_kwargs
+    ax.contour(x, y, ZZ, levels=[level], **contour_kwargs)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_xlabel(param_latex.get(param_x, param_x))
+    ax.set_ylabel(param_latex.get(param_y, param_y))
+    return ax
+
+
+def plot_pop_weighted_posteriors(
+    param_x, param_y, PE_samples, prob, colors,
+    posterior_pop_weights=None, comp_names=None, grids=None,
+    ax=None, legend=True, title=None, conf_thresh=0.75, savepath=None,
+):
+    """Plot one population-reweighted PE contour per event in (param_x, param_y).
+
+    Each event's contour is colored by its dominant labelled component when that
+    component's probability exceeds ``conf_thresh``, otherwise light gray.
+
+    Parameters
+    ----------
+    param_x, param_y : str
+        Parameters to plot.
+    PE_samples : dict
+        Maps parameter name -> array of shape (nevs, nsamples) of PE samples
+        (must be numpy arrays).
+    prob : np.ndarray
+        Per-event labelled-component probabilities, shape (nevs, ncomps).
+    colors : sequence
+        One color per labelled component (index-aligned with ``prob`` columns).
+    posterior_pop_weights : np.ndarray or None
+        Per-event, per-sample reweighting weights, shape (nevs, nsamples). If
+        None, contours use the unweighted PE posteriors.
+    comp_names : sequence of str or None
+        Component names for the legend (index-aligned with ``colors``).
+    grids : dict or None
+        Maps parameter name -> 1D grid; used to set axis limits.
+    ax : matplotlib axis or None
+    legend, title : see below.
+    conf_thresh : float
+        Probability above which an event is colored by its dominant component.
+    savepath : str or None
+        If given, the figure is saved there (tight bbox) and closed.
+    """
+    if ax is None:
+        _, ax = plt.subplots()
+    x_all = np.asarray(PE_samples[param_x])
+    y_all = np.asarray(PE_samples[param_y])
+    nevs = x_all.shape[0]
+    if posterior_pop_weights is None:
+        posterior_pop_weights = [None] * nevs
+    xlim = (grids[param_x][0], grids[param_x][-1]) if grids is not None else None
+    ylim = (grids[param_y][0], grids[param_y][-1]) if grids is not None else None
+
+    for ev_idx in range(nevs):
+        ev_prob = prob[ev_idx]
+        if np.any(ev_prob > conf_thresh):
+            color = colors[int(np.argmax(ev_prob))]
+            zorder = 2
+        else:
+            color = "lightgray"
+            zorder = 1
+        plot_ev_contour(
+            param_x, param_y, x_all[ev_idx], y_all[ev_idx],
+            weights=posterior_pop_weights[ev_idx], ax=ax,
+            colors=[color], zorder=zorder, xlim=xlim, ylim=ylim,
+        )
+
+    if legend and comp_names is not None:
+        real_comps = np.nonzero(np.any(prob > 0, axis=0))[0]
+        real_comps = real_comps[np.argsort([comp_names[int(i)] for i in real_comps])]
+        handles = [
+            plt.Line2D([], [], color=colors[int(i)], lw=0.8, label=textsc_ify(comp_names[int(i)]))
+            for i in real_comps
+        ]
+        ax.legend(handles=handles, fontsize=9, loc="lower right")
+    if title:
+        ax.set_title(title, fontsize=11)
+    if savepath:
+        fig = ax.get_figure()
+        fig.savefig(savepath, bbox_inches="tight")
+        plt.close(fig)
+    return ax

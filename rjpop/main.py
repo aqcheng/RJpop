@@ -92,6 +92,7 @@ parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), he
 parser.add_argument('--popsummary_path', type=str, default=None, help='Path to the popsummary directory for LVK results. Retrieves from config.json [o4b-astro_path]/popsummary_files, then falls back to [o4a-astro_path]/data_release by default')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--plot-only', action='store_true', help='Plot only, assuming there is already a results file; overrides args.nsteps and args.nburn')
+parser.add_argument('--ndraws', type=int, default=1000, help='Number of draws for creating posterior probability plots. Default: 1000')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
 parser.add_argument('--corner_param', type=int, nargs='+', default=None, help='An additional parameter to plot across all components. Should be a list of indices, corresponding to the parameter index of each branch in order. (-1 to skip branch)')
 parser.add_argument('--rasterize', type=int, default=1, help='Whether (1) or not (0) to rasterize the ppd plots. Default: 1')
@@ -170,6 +171,7 @@ with np.load(args.PE_samples) as f:
     PE_samples = {
         k: xp.asarray(v, dtype=xp.float32) for k, v in f.items() if k in params + ["prior"]
     }  # needed for initialization
+    event_names = np.asarray(f["event_names"], dtype=str) if "event_names" in f.files else None
 
 with np.load(args.injs) as f:
     injections = {
@@ -190,6 +192,8 @@ if args.ignore_events:
     for k, v in PE_samples.items():
         if v.size > 1:
             PE_samples[k] = xp.delete(v, inds_delete, axis=0)
+    if event_names is not None:
+        event_names = np.delete(event_names, utils.to_numpy(inds_delete))
 
     print(
         f"Removed {len(inds_delete)} event(s) from PE samples ({len(event_names_list)} -> {PE_samples['chi_eff'].shape[0]} events)"
@@ -996,10 +1000,7 @@ branching_fracs = Ntots_by_label / np.sum(Ntots_by_label, axis=-1, keepdims=True
 
 # R02_tot has shape (nsamples,) (no extra dimensions)
 
-ndraws = 1000
-
 ### CORNER PLOTS
-
 
 def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, share_axes=False, **corner_kwargs):
 
@@ -1255,8 +1256,8 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
             draw_ctx = {}
             for sig_name, inds in zip(sig_names_, model_inds_, strict=True):
                 samples_input, labels_input = [], []
-                if inds.size > ndraws:
-                    sel_inds_of_model_inds = np.arange(ndraws) * int(inds.size // ndraws)
+                if inds.size > args.ndraws:
+                    sel_inds_of_model_inds = np.arange(args.ndraws) * int(inds.size // args.ndraws)
                     sel_inds = inds[sel_inds_of_model_inds] # thin out
                 else:
                     sel_inds_of_model_inds = np.arange(len(inds))
@@ -1714,6 +1715,59 @@ if plot_submodels and submodel_bfs:
         )
         np.save(os.path.join(datapath, reweighted_fn), reweighted_samples)
         print(f"Saved {reweighted_fn}")
+    else:
+        event_probabilities = np.load(os.path.join(datapath, ev_prob_fn))
+        reweighted_samples = np.load(os.path.join(datapath, reweighted_fn))
+
+    # population-weighted PE contour plots: one reweighted KDE contour per event,
+    # colored by its dominant labelled component
+    PE_np = {
+        p: utils.to_numpy(PE_samples[p])
+        for p in ("mass_1_source", "chi_eff", "redshift", "mass_ratio")
+    }
+    for param_x, param_y in [
+        ("mass_1_source", "chi_eff"),
+        ("mass_1_source", "redshift"),
+        ("mass_1_source", "mass_ratio"),
+    ]:
+        pwp_fn = f"{param_x}_{param_y}_pop_weighted_posteriors_{lead_safe}.pdf"
+        if save_or_not(pwp_fn):
+            plot.plot_pop_weighted_posteriors(
+                param_x,
+                param_y,
+                PE_np,
+                event_probabilities,
+                component_palette,
+                posterior_pop_weights=reweighted_samples,
+                comp_names=comp_labels,
+                grids=data.data_grid,
+                title=submodel_title,
+                savepath=os.path.join(figpath, pwp_fn),
+            )
+            print(f"Saved {pwp_fn}")
+
+    # human-readable event probabilities table (event name + per-component prob)
+    ev_prob_txt_fn = f"event_probabilities_{lead_safe}.txt"
+    if save_or_not(ev_prob_txt_fn):
+        names = (
+            [str(n) for n in event_names]
+            if event_names is not None
+            else [f"event_{i}" for i in range(len(event_probabilities))]
+        )
+        name_w = max(len("event"), *(len(n) for n in names))
+        col_w = [max(len(str(c)), 8) for c in comp_labels]
+        lines = [
+            f"{'event':<{name_w}}"
+            + "".join(f"  {str(c):>{w}}" for c, w in zip(comp_labels, col_w, strict=True))
+        ]
+        for name, probs in zip(names, event_probabilities, strict=True):
+            lines.append(
+                f"{name:<{name_w}}"
+                + "".join(f"  {p:>{w}.4f}" for p, w in zip(probs, col_w, strict=True))
+            )
+        with open(os.path.join(datapath, ev_prob_txt_fn), "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        print(f"Saved {ev_prob_txt_fn}")
 
     # popsummary export: hyperparameter samples, 1D
     # marginal rates, and population-reweighted single-event posterior
