@@ -229,7 +229,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-out_path", "--out_path", type=str,
-        default=cfg.get('out_path'),
+        default=cfg.get('lvk_out_path'),
         help="Output directory. Default: out_path in ~/.rjpop_config.json",
     )
     # parser.add_argument(

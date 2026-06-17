@@ -1,7 +1,13 @@
 import argparse
+import builtins
 import json
 import os
 from glob import glob
+
+import sys
+
+if ("--cpu" in sys.argv) or ("-cpu" in sys.argv):
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import data
 
@@ -30,6 +36,16 @@ import plot
 import utils
 
 plot.setup()
+
+
+def _safe_print(*args, **kwargs):
+    try:
+        builtins.print(*args, **kwargs)
+    except BrokenPipeError:
+        pass
+
+
+print = _safe_print  # noqa: PLW0603 - intentionally override for safe logging
 
 if not hasattr(np, "in1d"): # eryn is built on an older version of numpy; np.in1d has been phased out
     def _in1d(ar1, ar2, assume_unique=False, invert=False):
@@ -63,6 +79,7 @@ parser.add_argument('--burn', '-burn', type=int, default=0, help='Number of burn
 parser.add_argument('--kde_update', type=int, default=0, help='Every kde_update steps, update the KDE from which the reversible jump moves are proposed. Default: 0 (never update, use prior for rj proposals)')
 parser.add_argument('--discard', '-discard', type=int, default=None, help='Number of steps to discard in post. Default: None (determine automatically)')
 parser.add_argument('--outdir', '-outdir', type=str, help='Output directory')
+parser.add_argument('--cpu', action='store_true', help='Force CPU instead of GPU')
 
 # Hyperparameters
 parser.add_argument('--use_mchirp', action='store_true', help='Use chirp mass instead of m1 - not currently implemented')
@@ -82,6 +99,7 @@ parser.add_argument('--rasterize', type=int, default=1, help='Whether (1) or not
 args = parser.parse_args()
 # print settings
 print(json.dumps(args.__dict__, indent=2))
+
 
 data.RNG_SEED = args.seed
 xp.random.seed(args.seed)
@@ -946,7 +964,6 @@ if "submodel_sigs" not in megadict:
     )
     print("Saved submodel information to samples_and_labels.npy")
 
-exit()
 
 # get R02s aggregated by label
 R0s_by_label, R02s_by_label, Ntots_by_label = [], [], []
@@ -964,12 +981,12 @@ branching_fracs = Ntots_by_label / np.sum(Ntots_by_label, axis=-1, keepdims=True
 
 # R02_tot has shape (nsamples,) (no extra dimensions)
 
-ndraws = 500
+ndraws = 1000
 
 ### CORNER PLOTS
 
 
-def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, **corner_kwargs):
+def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, share_axes=False, **corner_kwargs):
 
     X = np.asarray(X)
 
@@ -983,11 +1000,12 @@ def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, **corn
         fig, ax = plt.subplots()
         ax.hist(X, histtype="step", **hist_kwargs)
         ax.set_xlabel(labels_cols[0])
+        ax.set_ylabel(rf"$p({labels_cols[0].strip('$')})$")
         # quantiles
         qs = np.percentile(X.ravel(), 100 * np.asarray(plot.corner_defaults["quantiles"]))
         for q in qs:
             ax.axvline(q, color="k", linestyle="--")
-        ax.set_title(rf"${qs[1]:.2f}^{{{qs[2] - qs[1]:.2f}}}_{{{qs[1] - qs[0]:.2f}}}$")
+        ax.set_title(rf"${qs[1]:.2f}^{{+{qs[2] - qs[1]:.2f}}}_{{-{qs[1] - qs[0]:.2f}}}$")
 
     else:
         good = np.all(np.isfinite(X), axis=1)
@@ -1005,12 +1023,23 @@ def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, **corn
                 ranges.append(
                     (float(np.nanpercentile(col, 0.1)), float(np.nanpercentile(col, 99.9)))
                 )
+            if share_axes:
+                ranges_ = [(min([x[0] for x in ranges]), max([x[1] for x in ranges]))] * len(ranges)
+                ranges = ranges_
             input_kwargs["range"] = ranges
 
         if fig is None:
             figlen = 1.8 * X.shape[1]
             fig = plt.figure(figsize=(figlen, figlen))
         fig = corner(X, labels=labels_cols, fig=fig, **input_kwargs)
+
+        if share_axes: # plot diagonal line
+            axes = fig.axes
+            n = X.shape[1]
+            inds = np.tril_indices(n, k=1)
+            inds_flat = n*inds[0] + inds[1]
+            for i in inds_flat:
+                axes[i].plot([ranges[0][0], ranges[0][0]], [ranges[0][1], ranges[0][1]], color="darkgray", ls="--", lw=0.7)
 
     if title:
         fig.suptitle(title, y=1.02)
@@ -1028,7 +1057,7 @@ def _corner_plot_wrapper(X, labels_cols, name=None, fig=None, title=None, **corn
 # plot the component if in any model it contributes more than 1%
 nonsmall_comps = []
 for inds in model_inds:
-    nonsmall_comps.append(np.nonzero(np.median(branching_fracs[inds], axis=0) > 0.01)[0])
+    nonsmall_comps.append(np.nonzero(np.median(branching_fracs[inds], axis=0) > 0.001)[0])
 nonsmall_comps = np.unique(np.concatenate(nonsmall_comps))
 nonsmall_comp_label_sigs = [comp_label_sigs[int(i)] for i in nonsmall_comps]
 nonsmall_comp_labels = [comp_labels[int(i)] for i in nonsmall_comps]
@@ -1192,7 +1221,7 @@ if not args.skip_corner:  # skip for debugging
 
             X = np.stack(X, axis=-1)
             submodel_name = submodel_names[submodel_idx]
-            _corner_plot_wrapper(X, corner_param_labels, name=f"custom_param_{submodel_name}")
+            _corner_plot_wrapper(X, corner_param_labels, name=f"custom_param_{submodel_name}", share_axes=True)
 
 ### extract and plot PPDs
 print("\nPlotting PPDs")
@@ -1212,8 +1241,10 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
             for sig_name, inds in zip(sig_names_, model_inds_, strict=True):
                 samples_input, labels_input = [], []
                 if inds.size > ndraws:
-                    sel_inds = rng.choice(inds, size=ndraws, replace=False)
+                    sel_inds_of_model_inds = np.arange(ndraws) * int(inds.size // ndraws)
+                    sel_inds = inds[sel_inds_of_model_inds] # thin out
                 else:
+                    sel_inds_of_model_inds = np.arange(len(inds))
                     sel_inds = inds
                 for bn in data.branch_names:
                     samples_input.append(utils.to_numpy(samples_dict[bn][sel_inds]))
@@ -1229,6 +1260,7 @@ for model_or_submodel, sig_names_, model_inds_ in zip(
 
                 draw_ctx[sig_name] = {
                     "sel_inds": sel_inds,
+                    "sel_inds_of_model_inds": sel_inds_of_model_inds,
                     "samples_input": samples_input,
                     "labels_input": labels_input,
                     "R02_labelled_draws": R02_labelled_draws,
@@ -1341,7 +1373,7 @@ if popsummary_path is not None:
         )
 
 def plot_model_ppd(
-    param_name, color_tot="cornflowerblue", use_labels=True, plot_submodels=False, max_plot=3
+    param_name, color_tot="cornflowerblue", use_labels=True, plot_submodels=False, max_plot=4,
 ):
     """
     Plot PPDs using one subplot per RJ model (top-N by posterior frequency).
@@ -1388,7 +1420,6 @@ def plot_model_ppd(
         fig, axes = plt.subplots(nplot, 2, figsize=figsize, sharex=True, sharey=True)
         if nplot == 1:
             axes = [axes]
-        # last row will be combined between all models
 
         for model_idx, (row_axes, sig) in enumerate(zip(axes, sig_names, strict=True)):
             # plot each model
@@ -1410,11 +1441,6 @@ def plot_model_ppd(
                 branch_rate_ppd_by_label, branch_rate_by_label = _branch_label_ppd(
                     x, param_name, branch_idx, draw_ctx, use_labels
                 )
-
-                if param_name == "chi_eff":
-                    branch_rate_ppd_by_label = (
-                        branch_rate_ppd_by_label / draw_ctx["R02_tot_draws"][:, None]
-                    )  # want to plot chieff normalized
                 
                 ppd_by_comp.append(branch_rate_ppd_by_label)
                 rate_by_comp.append(branch_rate_by_label)
@@ -1428,10 +1454,13 @@ def plot_model_ppd(
                         legend_label = None
                     color = palette[label_idx] if use_labels else color_tot
 
+                    # want to plot chieff normalized
+                    norm = 1 if param_name != "chi_eff" else draw_ctx["R02_tot_draws"][:, None]
+
                     plot.plot_ppds(
                         ax_comp,
                         x,
-                        ppd,
+                        ppd / norm,
                         CI=None,
                         color=color,
                         label=legend_label,
@@ -1569,10 +1598,10 @@ if save_or_not(ppds_fn) or save_or_not(submodel_ppds_fn):
 
     for param_name in [
         "mass_1_source",
-        "mass_2_source",
         "chi_eff",
         "redshift",
         "mass_ratio",
+        "mass_2_source"
     ]:
         model_ppds_dict[f"{param_name}"] = plot_model_ppd(param_name, use_labels=False)
         # don't need to plot unlabelled twice
@@ -1604,6 +1633,101 @@ else:
         ).item()
     else:
         plot_submodels = False
+
+# ----------------------------------------------------------------------
+# Leading submodel (highest Bayes factor): condensed PPD plot, event
+# likelihoods (N*L), and population-reweighted posteriors.
+# ----------------------------------------------------------------------
+if plot_submodels and submodel_bfs:
+    lead_idx = int(np.argmax(submodel_bfs))
+    lead_sig = submodel_names[lead_idx]
+    lead_safe = utils.get_safe_fn(lead_sig)
+    lead_draw_ctx = draw_ctxs["submodel"][lead_sig]
+
+    # title indicating which (sub)model this is
+    if len(data.branch_names) <= 2:  # single local branch -> "x components"
+        ncomp = int(sum(submodel_sigs[lead_idx]))
+        submodel_title = f"\\texttt{{{args.label}}} - {ncomp} components"
+    else:  # multiple local branches -> "(x1 branch1, x2 branch2)"
+        submodel_title = (
+            f"\\texttt{{{args.label}}} - ({submodel_model_signames_all[lead_sig]})"
+        )
+
+    # condensed PPD plot (m1, q, chi_eff; components + totals)
+    all_param_ppds_fn = f"all_param_ppds_{lead_safe}.pdf"
+    if save_or_not(all_param_ppds_fn):
+        plot.plot_all_param_ppds(
+            submodel_ppds_dict,
+            lead_sig,
+            comp_label_info={
+                "comp_names": comp_labels,
+                "comp_sigs": comp_label_sigs,
+                "colors": component_palette,
+            },
+            res=res,
+            spin_res=spin_res,
+            catalog=plot_cat,
+            title=submodel_title,
+            savepath=os.path.join(figpath, all_param_ppds_fn),
+            rasterize=args.rasterize,
+        )
+        print(f"Saved {all_param_ppds_fn}")
+
+    # event likelihoods (N*L) and population-reweighted posteriors
+    NL_fn = f"NL_{lead_safe}.npy"
+    ev_prob_fn = f"event_probabilities_{lead_safe}.npy"
+    reweighted_fn = f"PE_posterior_reweighted_samples_{lead_safe}.npy"
+    if save_or_not(NL_fn) or save_or_not(ev_prob_fn) or save_or_not(reweighted_fn):
+        ncomps_per_branch = [
+            int(n_labelled_comps[b_idx]) for b_idx in range(len(data.branch_names) - 1)
+        ]
+
+        print("Computing event likelihoods (N*L) for leading submodel...")
+        NL = data.compute_NL_event_likelihoods(lead_draw_ctx, PE_samples)
+        np.save(os.path.join(datapath, NL_fn), NL)
+        print(f"Saved {NL_fn}")
+
+        print("Computing population-reweighted posteriors for leading submodel...")
+        event_probabilities = data.get_pop_weighted_posterior(
+            lead_draw_ctx, PE_samples, ncomps_per_branch, NL=NL, average_over_PE=True
+        )
+        np.save(os.path.join(datapath, ev_prob_fn), event_probabilities)
+        print(f"Saved {ev_prob_fn}")
+
+        reweighted_samples = data.get_pop_weighted_posterior(
+            lead_draw_ctx, PE_samples, ncomps_per_branch, NL=NL, average_over_PE=False
+        )
+        np.save(os.path.join(datapath, reweighted_fn), reweighted_samples)
+        print(f"Saved {reweighted_fn}")
+
+    # popsummary export: hyperparameter samples, 1D
+    # marginal rates, and population-reweighted single-event posterior
+    popsummary_fn = data.get_popsummary_fn(lead_sig, outdir)
+    if save_or_not(popsummary_fn):
+        if os.path.exists(popsummary_fn):
+            os.remove(popsummary_fn)  # PopulationResult creates the file fresh
+        print(f"Writing popsummary file for submodel '{lead_sig}'...")
+        ps_res = data.initialize_popsummary(
+            megadict,
+            model_ppds_dict,
+            submodel_ppds_dict,
+            draw_ctxs["submodel"],
+            lead_sig,
+            args,
+            outdir,
+            popmodel_label=args.label,
+        )
+        event_params = [p for p in data.data_grid if p in model_ppds_dict]
+        reweighted_event_samples = data.compute_reweighted_event_samples(
+            lead_draw_ctx, PE_samples, event_params
+        )
+        ps_res.set_reweighted_event_samples(
+            reweighted_event_samples,
+            hyperparameter_sample_idx_map=lead_draw_ctx["sel_inds_of_model_inds"],
+        )
+        print(f"Saved {os.path.basename(popsummary_fn)}")
+    else:
+        ps_res = PopulationResult(popsummary_fn)
 
 # finally, plot 2D!!
 
@@ -1639,6 +1763,7 @@ for param_x, param_y in [
     if save_or_not(f"contours2d_{param_x}_{param_y}*_labelled.pdf"):
         for sig_name, bf in zip(sig_names, bayes_factors, strict=False):
             if bf > 0.5:
+                res = ps_res if bf == np.amax(bayes_factors) else None
                 data.plot_param_2D_contours_and_marginals(  # all individually
                     param_x,
                     param_y,
@@ -1651,7 +1776,8 @@ for param_x, param_y in [
                     color=component_palette,
                     comp_label="all",
                     CI=None,
-                    rasterize=args.rasterize
+                    rasterize=args.rasterize,
+                    popsummary_res=res
                 )
     if plot_submodels:
         if save_or_not(f"contours2d_{param_x}_{param_y}*_submodel_labelled.pdf"):

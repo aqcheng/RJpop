@@ -103,17 +103,29 @@ def recursive_pad(datadict):
     return res
 
 
-def recursive_get(datadict, key):
+def recursive_get(datadict, key, return_superkey=False, superkey=None):
     """
-    Recursively gets and concatenates all dict[key] for all subdictionaries of datadict, including itself.
-    Assumes that dict[key] are lists.
+    Recursively collects all values associated with ``key`` in ``datadict`` and
+    its nested dictionaries. When ``return_superkey`` is True, also returns the
+    immediate dictionary key each value came from.
     """
     res = []
+    superkeys = []
+
     for k, v in datadict.items():
         if k == key:
-            res.extend(v)
-        elif type(v) is dict:
-            res.extend(recursive_get(v, key))
+            values = v if isinstance(v, list) else [v]
+            res.extend(values)
+            superkeys.extend([superkey] * len(values))
+        elif isinstance(v, dict):
+            child_vals, child_keys = recursive_get(
+                v, key, return_superkey=True, superkey=k
+            )
+            res.extend(child_vals)
+            superkeys.extend(child_keys)
+
+    if return_superkey:
+        return res, superkeys
     return res
 
 

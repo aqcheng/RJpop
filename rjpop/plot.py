@@ -37,6 +37,7 @@ plot_style = {
     "savefig.format": "pdf",
     "savefig.bbox": "tight",
     "text.usetex": True,
+    "axes.unicode_minus": False,
     "axes.labelpad": 2.5,
 }
 
@@ -50,6 +51,11 @@ def setup():
 def textsc_ify(word: str) -> str:
     return f"$\\textsc{{{word}}}$"
 
+def add_superscript(latex: str, superscript: str) -> str:
+    res = latex.strip("$")
+    exp = rf"\rm{{{superscript}}}"
+    res += rf"^{{{exp}}}"
+    return f"${res}$"
 
 def plot_ppds(
     ax,
@@ -67,6 +73,7 @@ def plot_ppds(
     swap_xy=False,
     rasterize=False,
 ):
+    x = x.ravel()
     if CI is None:
         ppds = ppds[np.any(ppds > 0, axis=-1)]
         segments = np.empty((ppds.shape[0], ppds.shape[1], 2))
@@ -278,12 +285,19 @@ def plot_2D_contours_and_marginals(
     ax_joint.set_ylabel(ylabel, fontsize=10)
     ax_x.tick_params(axis="both", which="both", labelleft=False, labelbottom=False, length=0)
     ax_y.tick_params(axis="both", which="both", labelleft=False, labelbottom=False, length=0)
-    ax_x.set_ylabel(
-        f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{xlabel.strip('$')}$", fontsize=8, labelpad=6
-    )
-    ax_y.set_xlabel(
-        f"$\\mathrm{{d}}\\mathcal{{R}}/\\mathrm{{d}}{ylabel.strip('$')}$", fontsize=8, labelpad=6
-    )
+    
+    if xlabel is not None:
+        if "redshift" in xlabel or "z" in xlabel:
+            p_xlabel = f"$p({xlabel.strip('$')})$"
+        else:
+            p_xlabel = f"$p({xlabel.strip('$')} | z=0.2)$"
+        if "redshift" in ylabel or "z" in ylabel:
+            p_ylabel = f"$p({ylabel.strip('$')})$"
+        else:
+            p_ylabel = f"$p({ylabel.strip('$')} | z=0.2)$"
+
+        ax_x.set_ylabel(p_xlabel, fontsize=8, labelpad=6)
+        ax_y.set_xlabel(p_ylabel, fontsize=8, labelpad=6)
 
     return fig, ax_joint, ax_x, ax_y
     # fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.9), ncol=len(handles))
@@ -488,3 +502,130 @@ def setup_and_plot_GWTC(
             line_default_kwargs.update(CI_kwargs)
 
         plot_ppds(ax, x, y, **line_default_kwargs)
+
+
+def plot_all_param_ppds(
+    ppds_dict,
+    model_sig,
+    comp_label_info,
+    res=None,
+    spin_res=None,
+    catalog=None,
+    title=None,
+    labeldict=None,
+    savepath=None,
+    rasterize=False,
+):
+    """Condensed PPD figure for a single (sub)model signature.
+
+    Shows mass_1, mass ratio, and chi_eff, each both broken down by labelled
+    component (left axis of each pair) and as a total with 90% CI (right axis),
+    overlaid with the LVK reference results.
+
+    Parameters
+    ----------
+    ppds_dict : dict
+        A model/submodel ppds dict (e.g. the contents of ``ppds_submodels.npy``)
+        holding, for each parameter, ``ppds_dict[f"{param}_labelled"][model_sig]
+        [comp_name]`` arrays of shape (ndraws, ngrid) and an "x" grid.
+    model_sig : str
+        The (sub)model signature key to plot.
+    comp_label_info : dict
+        ``{"comp_names": [...], "colors": [...]}`` for the labelled components.
+    res, spin_res : PopulationResult or None
+        LVK reference results for the GWTC overlays.
+    catalog : str or None
+        "GWTC4"/"GWTC5", forwarded to :func:`setup_and_plot_GWTC`.
+    title : str or None
+        Figure suptitle.
+    labeldict : dict or None
+        Optional mapping ``comp_name -> display label``.
+    savepath : str or None
+        If given, the figure is saved there (tight bbox) and closed.
+    """
+    fig = plt.figure(figsize=(7, 3.5))
+    gs = gridspec.GridSpec(2, 5, width_ratios=(1, 1, 0.1, 1, 1), hspace=0.35, wspace=0.15)
+    axm = fig.add_subplot(gs[0, 0:2])
+    axq = fig.add_subplot(gs[1, 0])
+    axqtot = fig.add_subplot(gs[1, 1], sharex=axq, sharey=axq)
+    axmtot = fig.add_subplot(gs[0, 3:5], sharex=axm, sharey=axm)
+    axchi = fig.add_subplot(gs[1, 3])
+    axchitot = fig.add_subplot(gs[1, 4], sharex=axchi, sharey=axchi)
+
+    comp_axes = [axm, axq, axchi]
+    tot_axes = [axmtot, axqtot, axchitot]
+    param_names = ["mass_1_source", "mass_ratio", "chi_eff"]
+
+    for comp_ax, tot_ax, param_name in zip(comp_axes, tot_axes, param_names):
+        param_ppds = ppds_dict[f"{param_name}_labelled"]
+        x = param_ppds["x"]
+        sig_ppds = param_ppds[model_sig]
+
+        # gather the labelled components present in this (sub)model
+        comps = []
+        for comp_name, color in zip(comp_label_info["comp_names"], comp_label_info["colors"]):
+            if comp_name in sig_ppds:
+                ppds = sig_ppds[comp_name]
+                if np.any(ppds):
+                    comps.append((comp_name, color, ppds))
+        tot_ppds = sum((ppds for _, _, ppds in comps), start=0)
+
+        # mass and mass ratio are shown rate-weighted, but chi_eff is shown as a
+        # normalized density p(chi_eff). The stored chi_eff ppds are rate-weighted
+        # (dR/dchi_eff), so divide each draw by its total rate -- equivalently the
+        # integral of the rate-weighted total over chi_eff (no-op if already a density).
+        norm = 1.0
+        if param_name == "chi_eff" and np.any(tot_ppds):
+            norm = np.trapezoid(tot_ppds, x, axis=-1)[:, None]
+            norm = np.where(norm == 0, 1.0, norm)
+
+        for comp_name, color, ppds in comps:
+            label = comp_name if labeldict is None else labeldict.get(comp_name, comp_name)
+            plot_ppds(comp_ax, x, ppds / norm, color=color, CI=None,
+                      label=textsc_ify(label), rasterize=rasterize, line_alpha=0.1 * 500 / ppds.shape[0])
+        if np.any(tot_ppds):
+            plot_ppds(tot_ax, x, tot_ppds / norm, color="cornflowerblue",
+                      CI=90, lw=0.7, secondary_lw=0.7, label="Total")
+        setup_and_plot_GWTC(param_name, comp_ax, res=res, spin_res=spin_res,
+                            catalog=catalog, CI_kwargs=dict(color="dimgray"))
+        setup_and_plot_GWTC(param_name, tot_ax, res=res, spin_res=spin_res,
+                            catalog=catalog, CI_kwargs=dict(color="dimgray"))
+
+        if param_name == "chi_eff" and np.any(tot_ppds):
+            comp_ax.set_ylim(0, 8)
+
+    for ax in tot_axes:
+        ax.set_ylabel(None)
+        ax.tick_params(axis="y", which="both", labelleft=False)
+    for ax in (axqtot, axchitot):
+        ax.tick_params(axis="y", which="both", labelleft=False, length=0)
+    for ax in comp_axes + tot_axes:
+        ax.yaxis.labelpad = 1.75
+        ax.xaxis.labelpad = 0
+        ax.grid(True)
+    for ax in (axq, axqtot):
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
+        ax.set_xticklabels(["0", "0.25", "0.5", "0.75", "1"])
+
+    all_handles, all_labels = [], []
+    for ax in (axm, axmtot):
+        h, l = ax.get_legend_handles_labels()
+        for h_, l_ in zip(h, l, strict=True):
+            if l_ not in all_labels:
+                all_handles.append(h_)
+                all_labels.append(l_)
+    if all_handles:
+        all_labels, all_handles = zip(*sorted(zip(all_labels, all_handles)))
+        ncol = len(all_handles)
+        if ncol > 5:
+            ncol = int(np.ceil(len(all_handles) / 2))
+        fig.legend(handles=all_handles, labels=all_labels, loc="lower center",
+                   bbox_to_anchor=(0.5, 0.88), ncol=ncol, columnspacing=1,
+                   frameon=False, fontsize=9)
+    if title:
+        fig.suptitle(title, y=1.02, fontsize=14)
+
+    if savepath:
+        fig.savefig(savepath, bbox_inches="tight")
+        plt.close(fig)
+    return fig

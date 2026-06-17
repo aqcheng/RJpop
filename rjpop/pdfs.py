@@ -386,13 +386,29 @@ class jf_skew_t(trunc_dist):
     @staticmethod
     def _cdf(x, logalpha, logkappa):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
-        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)) * 0.5
+        # In-place ops to keep only 2 full-size arrays live at once
+        # (same pattern as the optimised _pdf above).
+        y = x + shift          # owned buffer
+        denom = y * y
+        denom += a + b
+        xp.sqrt(denom, out=denom)
+        y /= denom             # y = (x+shift) / sqrt(a+b+(x+shift)^2)
+        del denom
+        y += 1.0
+        y *= 0.5               # y = (1 + …) / 2
         return special.betainc(a, b, y)
 
     @staticmethod
     def _logcdf(x, logalpha, logkappa):
         a, b, shift = jf_skew_t._reparam_and_shift(logalpha, logkappa)
-        y = (1 + (x + shift) / xp.sqrt(a + b + (x + shift) ** 2)) * 0.5
+        y = x + shift
+        denom = y * y
+        denom += a + b
+        xp.sqrt(denom, out=denom)
+        y /= denom
+        del denom
+        y += 1.0
+        y *= 0.5
         return lnbetainc(a, b, y)
 
 
@@ -566,6 +582,7 @@ class SGED(trunc_dist):
 
 
 class powerlaw:
+
     @staticmethod
     def pdf(x, beta, xmin, xmax):
         r"""
@@ -786,7 +803,7 @@ class LVK_Plancktaper_powerlaw(dist):
         if xx_int is None:
             xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
 
-        norm = xp.trapz(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
+        norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
 
         if xp.asarray(norm).ndim > 0:
             norm = norm[:, None]
@@ -801,7 +818,7 @@ class LVK_Plancktaper_powerlaw(dist):
         if xx_int is None:
             xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
 
-        norm = xp.trapz(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)[
+        norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)[
             :, None
         ]
         return logpdf_unnorm - xp.log(norm)
@@ -1079,24 +1096,49 @@ class sym_gaussian_copula_mass_model(MassModel):
         """
 
         m1, m2 = data["mass_1_source"], data["mass_2_source"]
+        factor = xp.sqrt((1.0 - rho) / (1.0 + rho))  # per-leaf scalar broadcast
 
+        # --- z1 = Phi^{-1}(F(m1)),  z2 = Phi^{-1}(F(m2)) ---
         u = self.m_model.cdf(m1, **mass_1_source_kwargs)
-        v = self.m_model.cdf(m2, **mass_1_source_kwargs)
-
-        jacobian = m1  # P(m1, m2) -> P(m1, q)
-
-        factor = xp.sqrt((1.0 - rho) / (1.0 + rho))
         z1 = special.ndtri(u)
+        del u
+        v = self.m_model.cdf(m2, **mass_1_source_kwargs)
         z2 = special.ndtri(v)
+        del v
 
-        p_m1 = 2 * self.m_model.pdf(m1, **mass_1_source_kwargs) * special.ndtr(factor * z1)
-        p_m2 = 2 * self.m_model.pdf(m2, **mass_1_source_kwargs) * special.ndtr(-factor * z2)
-        copula_vals = xp.exp(
-            (2 * rho * z1 * z2 - rho**2 * (z1**2 + z2**2)) / (2 * (1.0 - rho**2))
-        ) / xp.sqrt(1.0 - rho**2)
+        # --- result = p_m1 built in-place, then *= p_m2 ---
+        result = self.m_model.pdf(m1, **mass_1_source_kwargs)  # owned buffer
+        ndtr_fz1 = special.ndtr(factor * z1)
+        result *= 2.0 * ndtr_fz1
+        del ndtr_fz1
 
-        res = p_m1 * p_m2 * copula_vals * 2 * jacobian * _check_gaussian_copula_params(m1, m2, rho)
-        return xp.nan_to_num(res, copy=False, nan=0, posinf=0, neginf=0)
+        pdf_m2 = self.m_model.pdf(m2, **mass_1_source_kwargs)
+        ndtr_fz2 = special.ndtr(-(factor * z2))
+        result *= 2.0 * pdf_m2 * ndtr_fz2
+        del pdf_m2, ndtr_fz2
+
+        # --- copula = exp(num/denom) / sqrt(1-rho^2) built in-place ---
+        # num = 2*rho*z1*z2 - rho^2*(z1^2+z2^2),  denom = 2*(1-rho^2)
+        # After this block z1 and z2 are no longer needed.
+        rho2 = rho ** 2
+        copula = z1 * z2                   # new buffer
+        copula *= 2.0 * rho                # 2*rho*z1*z2  (in-place)
+        sq_sum = z1 * z1
+        sq_sum += z2 * z2                  # z1^2 + z2^2  (one temp for z2*z2)
+        del z1, z2
+        sq_sum *= rho2
+        copula -= sq_sum                   # numerator   (in-place)
+        del sq_sum
+        copula /= 2.0 * (1.0 - rho2)      # divide by denominator (in-place)
+        xp.exp(copula, out=copula)         # exp in-place
+        copula /= xp.sqrt(1.0 - rho2)     # normalise copula (in-place, rho2 is tiny)
+
+        result *= copula
+        del copula
+
+        # jacobian P(m1,m2)->P(m1,q) = m1; validity mask zeros out m2>m1 or |rho|>=1
+        result *= 2.0 * m1 * _check_gaussian_copula_params(m1, m2, rho)
+        return xp.nan_to_num(result, copy=False, nan=0, posinf=0, neginf=0)
 
     def _p_m1(self, m1, rho, mass_1_source_kwargs):
         r"""
@@ -1210,10 +1252,11 @@ class BaseRate:
 
         psizz = xp.nan_to_num(self.psi(zz, *args, **kwargs), nan=0, posinf=0, neginf=0)
 
-        return xp.trapz(Vzz * psizz / (1.0 + zz), zz) * R0
+        return xp.trapezoid(Vzz * psizz / (1.0 + zz), zz) * R0
 
 
 class PL_rate(BaseRate):
+
     @staticmethod
     def psi(z, gamma):
         """
@@ -1263,6 +1306,7 @@ MODELS = {
         "sym_gaussian_copula": {
             "model": sym_gaussian_copula_mass_model,
             "param_latex": {"rho": r"$\rho$"},
+            "param_desc": {"rho": "correlation coefficient between m1 and m2"},
         },
     },
     "mass_1_source": {  # for p(m1) or p(m2)
@@ -1270,13 +1314,30 @@ MODELS = {
             "xmin": r"$m_{\min}$",
             "xmax": r"$m_{\max}$",
         },
+        "param_desc": {
+            "xmin": "primary mass minimum",
+            "xmax": "primary mass maximum"
+        },
+        "param_unit": {
+            "loc": "solMass",
+            "scale": "solMass",
+            "delta": "solMass",
+            "xmin": "solMass",
+            "xmax": "solMass"
+        },
         "skew-t": {
             "model": jf_skew_t(),
             "param_latex": {
-                "logalpha": r"$\log_{10}\alpha$",
-                "logkappa": r"$\log_{10}\kappa$",
+                "logalpha": r"$\log\alpha$",
+                "logkappa": r"$\log\kappa$",
                 "loc": r"$\mu_m$",
                 "scale": r"$\sigma_m$",
+            },
+            "param_desc": {
+                "logalpha": "m1 skew-t tail weight parameter",
+                "logkappa": "m1 skew-t skew parameter",
+                "loc": "m1 skew-t location parameter, determines the mode of the skew-t distribution",
+                "scale": "m1 skew-t scale parameter",
             },
             "params_fix": {"xmax": XMAX_FIX},
         },
@@ -1286,6 +1347,10 @@ MODELS = {
                 "alpha": r"$\alpha$",
                 "p": r"$p_m$",
             },
+            "param_desc": {
+                "alpha": "m1 power-law slope (must exceed 1 for normalization)",
+                "p": "smoothing exponent governing the low-mass taper of p(m1)",
+            },
             "params_fix": {"xmax": XMAX_FIX},
         },
         "PLS_LVK": {
@@ -1293,6 +1358,10 @@ MODELS = {
             "param_latex": {
                 "alpha": r"$\alpha$",
                 "delta": r"$\delta_m$",
+            },
+            "param_desc": {
+                "alpha": "primary mass power-law exponent",
+                "delta": "p(m1) Planck taper width controlling the low-end smoothing",
             },
             "params_fix": {"xmax": XMAX_FIX},
         },
@@ -1302,14 +1371,25 @@ MODELS = {
                 "loc": r"$\mu_p$",
                 "scale": r"$\sigma_p$",
             },
+            "param_desc": {
+                "loc": "m1 Gaussian mean",
+                "scale": "m1 Gaussian standard deviation",
+            },
             "params_fix": {"xmax": XMAX_FIX},
         },
     },
     "mass_ratio": {
+        "param_desc": {
+            "xmin": "minimum mass ratio",
+            "xmax": "maximum mass ratio",
+        },
         "PL": {
             "model": powerlaw(),
             "param_latex": {
                 "beta": r"$\beta$",
+            },
+            "param_desc": {
+                "beta": "mass ratio power-law index",
             },
             "params_fix": {
                 "xmax": 1.0,
@@ -1321,25 +1401,36 @@ MODELS = {
                 "loc": r"$\mu_{q}$",
                 "scale": r"$\sigma_{q}$",
             },
+            "param_desc": {
+                "loc": "mass ratio Gaussian mean",
+                "scale": "mass ratio Gaussian standard deviation",
+            },
             "params_fix": {"xmax": 1.0},
         },
     },
     "chi_eff": {
+        "param_latex": {
+            "loc": r"$\mu_{\chi}$",
+            "scale": r"$\sigma_{\chi}$",
+        },
+        "param_desc": {
+            "xmin": "minimum chi_eff",
+            "xmax": "maximum chi_eff",
+            "loc": "chi_eff Gaussian mean",
+            "scale": "chi_eff Gaussian standard deviation"
+        },
         "gen_gauss": {
             "model": gen_gaussian(),
             "param_latex": {
-                "beta": r"$\beta_{\chi}$",
-                "loc": r"$\mu_{\chi}$",
-                "scale": r"$\sigma_{\chi}$",
+                "beta": r"$\beta_{\chi}$"
+            },
+            "param_desc": {
+                "beta": "chi_eff generalized Gaussian shape parameter"
             },
             "params_fix": {"xmin": -1.0, "xmax": 1.0},
         },
         "gauss": {
             "model": gaussian(),
-            "param_latex": {
-                "loc": r"$\mu_{\chi}$",
-                "scale": r"$\sigma_{\chi}$",
-            },
             "params_fix": {"xmin": -1.0, "xmax": 1.0},
         },
     },
@@ -1351,11 +1442,17 @@ MODELS = {
                 "kappa": r"$\kappa$",
                 "zp": r"$z_p$",
             },
+            "param_desc": {
+                "gamma": "Madau-Dickinson low-z power-law exponent",
+                "kappa": "Madau-Dickinson shape parameter",
+                "zp": "Madau-Dickinson pivot redshift",
+            },
             "params_fix": {},
         },
         "PL": {
             "model": PL_rate(cosmo=Planck15),
             "param_latex": {"gamma": r"$\gamma$"},
+            "param_desc": {"gamma": "redshift rate power-law exponent"},
             "params_fix": {},
         },
     },

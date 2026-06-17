@@ -18,6 +18,7 @@ except (ModuleNotFoundError, ImportError, RuntimeError) as e:
     def scatter_add(a, slices, value):
         xp.add.at(a, slices, value)
     
+    from scipy import special
     use_cupy = False
 
 EPS = float( xp.finfo(xp.float64).eps * 2 )

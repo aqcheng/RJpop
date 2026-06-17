@@ -4,14 +4,13 @@ import sys
 
 import h5py
 import numpy as np
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rjpop'))
 from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
 from rjpop.load_config import load_config
 
 FAR_THR = 1   # 1/yr
-RHO_THR = 10
+RHO_THR = 11
 
 if __name__ == '__main__':
     cfg = load_config()
@@ -27,7 +26,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--out_path', '-out_path', type=str,
-        default=cfg.get('out_path'),
+        default=cfg.get('lvk_out_path'),
         help='Output directory. Default: out_path in ~/.rjpop_config.json',
     )
     parser.add_argument(
@@ -94,7 +93,8 @@ if __name__ == '__main__':
         injs['far'] = far_min
         injs['rho'] = rho_opt
 
-        mask = (rho_opt >= args.rho_thr) | (far_min <= args.far_thr)
+        # use SNR threshold only when FAR not available, i.e. O1 and O2
+        mask = ((rho_opt >= args.rho_thr) & ~np.isfinite(far_min)) | (far_min <= args.far_thr)
 
         injs = {k: v[mask] for k, v in injs.items()}  # save only detected events
 

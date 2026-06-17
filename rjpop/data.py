@@ -13,6 +13,7 @@ from matplotlib.patches import Patch
 from scipy.stats import gaussian_kde
 from sklearn.cluster import KMeans
 from xp import INF, scatter_add, xp
+from popsummary.popresult import PopulationResult
 
 # ---------------------------
 # --------- GLOBALS ---------
@@ -75,6 +76,8 @@ def _process_param_hp_priors(
         )
         assert param in params, "param must be evaluated in a local branch if no model specified"
         hps_fix = {}
+
+        # get model
         model_name = None
 
     hp_idx = hp_idx_start
@@ -99,10 +102,23 @@ def _process_param_hp_priors(
                 hp_ordering[branch_idx]["__latex__"].append(
                     pdfs.MODELS[param_get][model_name]["param_latex"][hp]
                 )
+                hp_ordering[branch_idx]["__desc__"].append(
+                    pdfs.MODELS[param_get][model_name]["param_desc"][hp]
+                )
             except KeyError:
                 hp_ordering[branch_idx]["__latex__"].append(
                     pdfs.MODELS[param_get]["param_latex"].get(hp, hp)
                 )
+                hp_ordering[branch_idx]["__desc__"].append(
+                    pdfs.MODELS[param_get]["param_desc"].get(hp, None)
+                )
+            
+            try:
+                hp_ordering[branch_idx]["__unit__"].append(
+                    pdfs.MODELS[param_get]["param_unit"].get(hp, "")
+                )
+            except KeyError:
+                hp_ordering[branch_idx]["__unit__"].append("") # unitless if not given
 
             hp_idx += 1
 
@@ -166,6 +182,8 @@ def process_input_priordict(input_priordicts, rate_prior=(0.05, 100)):
 
         hp_idx = 0
         hp_ordering[branch_idx]["__latex__"] = []
+        hp_ordering[branch_idx]["__desc__"] = []
+        hp_ordering[branch_idx]["__unit__"] = []
 
         for param, input_param_priordict in input_dict.items():
             if param.startswith("__") or param.endswith("__"):  # ignore special / metainfo keys
@@ -183,6 +201,8 @@ def process_input_priordict(input_priordicts, rate_prior=(0.05, 100)):
             #  add R0 for each local branch
             branch_priordicts[branch_idx][hp_idx] = uniform_dist(*rate_prior)
             hp_ordering[branch_idx]["__latex__"].append("$R_0$")
+            hp_ordering[branch_idx]["__desc__"].append("merger rate of component at z=0")
+            hp_ordering[branch_idx]["__unit__"].append("yr-1 Gpc-3")
             hp_idx += 1
 
         # each local branch will have the number of parameters specified in the prior file + 1 (R0)
@@ -1042,6 +1062,226 @@ def get_branch_rates(branch_idx, hps, labels=None, z=0.2):
     return rates
 
 
+def compute_NL_event_likelihoods(draw_ctx, PE_samples, ev_chunk_size=15):
+    """Compute N^m * L(d_i | {lam^m}, Lam^m) for every population posterior draw m
+    and event i, for a single (sub)model.
+
+    Parameters
+    ----------
+    draw_ctx : dict
+        A single (sub)model's draw context (one entry of a ``*_draw_ctxs.npy``
+        dict), containing "samples_input" (list of per-branch hyperparameter
+        draws).
+    PE_samples : dict
+        PE posterior samples, each of shape (nevs, nsamples), plus a "prior" key.
+    ev_chunk_size : int
+        Number of events processed at once (limits peak memory).
+
+    Returns
+    -------
+    np.ndarray of shape (ndraws, nevs)
+        N*L for each population draw and event.
+    """
+    nevs, nsamples = PE_samples["redshift"].shape
+    hps = [xp.asarray(v) for v in draw_ctx["samples_input"]]
+
+    ev_idx = 0
+    NL_chunks = []
+    while ev_idx < nevs:
+        ev_end_idx = min(nevs, ev_idx + ev_chunk_size)
+        nevs_chunk = ev_end_idx - ev_idx
+        PE_samples_flat = {k: v[ev_idx:ev_end_idx].ravel() for k, v in PE_samples.items()}
+        NL_chunk = 0.0
+        for b_idx in range(len(branch_names) - 1):
+            dNdtheta = 1.0
+            for param in ("mass", "chi_eff", "redshift"):
+                param_b_idx = b_idx if param in hp_ordering[b_idx] else -1
+                dNdtheta = dNdtheta * eval_param_model(PE_samples_flat, param_b_idx, param, hps)
+            dNdtheta = dNdtheta * hps[b_idx][..., -1, None]
+            dNdtheta = dNdtheta / PE_samples_flat["prior"]
+            dNdtheta = dNdtheta.reshape(dNdtheta.shape[:-1] + (nevs_chunk, nsamples))
+            dNdtheta = xp.nansum(dNdtheta, axis=1)  # sum over leaves -> (ndraws, nevs_chunk, nsamples)
+            NL_chunk = NL_chunk + utils.to_numpy(dNdtheta)
+        NL_chunks.append(np.nanmean(NL_chunk, axis=-1))  # avg over PE -> (ndraws, nevs_chunk)
+        ev_idx = ev_end_idx
+    return np.concatenate(NL_chunks, axis=1)  # (ndraws, nevs)
+
+
+def get_pop_weighted_posterior(
+    draw_ctx, PE_samples, ncomps_per_branch,
+    NL=None, ev_chunk_size=15, average_over_PE=True,
+):
+    """Population-reweighted posterior for each event under one (sub)model.
+
+    Parameters
+    ----------
+    draw_ctx : dict
+        A single (sub)model's draw context (see ``compute_NL_event_likelihoods``),
+        containing "samples_input" and "labels_input".
+    PE_samples : dict
+        PE posterior samples, each of shape (nevs, nsamples), plus a "prior" key.
+    ncomps_per_branch : sequence of int
+        Number of labelled components in each local branch (``branch_names[:-1]``).
+    NL : np.ndarray or None
+        Event likelihoods N*L of shape (ndraws, nevs) for the leave-one-out
+        correction (weight by 1/(N*L)). If None, weight by 1/N_tot instead.
+    ev_chunk_size : int
+        Number of events processed at once.
+    average_over_PE : bool
+        If True, return per-event labelled-component probabilities of shape
+        (nevs, ncomps_tot) (soft component assignment). If False, return the
+        population-reweighted per-PE-sample weights of shape (nevs, nsamples).
+    """
+    nevs, nsamples = PE_samples["redshift"].shape
+    hps = [xp.asarray(v) for v in draw_ctx["samples_input"]]
+
+    # NL=None: skip leave-one-out correction (weight by 1/N_tot)
+    # NL=array: weight by 1/(N*L)
+    use_NL = NL is not None
+    if not use_NL:
+        Ntot = 0
+        for b_idx in range(len(branch_names) - 1):
+            Ntot = Ntot + xp.nansum(get_branch_Ntot(b_idx, hps, labels=None), axis=-1)
+        Ntot = Ntot.reshape((-1, 1, 1, 1))  # broadcast with (ndraws, ncomps, nevs, nsamples)
+
+    ev_idx = 0
+    per_ev = []
+    while ev_idx < nevs:
+        per_branch = []
+        ev_end_idx = min(nevs, ev_idx + ev_chunk_size)
+        nevs_chunk = ev_end_idx - ev_idx
+        PE_samples_flat = {k: v[ev_idx:ev_end_idx].ravel() for k, v in PE_samples.items()}
+        if use_NL:
+            NL_chunk = xp.asarray(NL[:, ev_idx:ev_end_idx])  # (ndraws, nevs_chunk)
+        for b_idx, ncomps in enumerate(ncomps_per_branch):
+            dNdtheta = 1.0
+            for param in ("mass", "chi_eff", "redshift"):
+                param_b_idx = b_idx if param in hp_ordering[b_idx] else -1
+                dNdtheta = dNdtheta * eval_param_model(PE_samples_flat, param_b_idx, param, hps)
+            dNdtheta = dNdtheta * hps[b_idx][..., -1, None]
+            dNdtheta = dNdtheta / PE_samples_flat["prior"]
+            dNdtheta = dNdtheta.reshape(dNdtheta.shape[:-1] + (nevs_chunk, nsamples))
+            if use_NL:
+                dNdtheta = dNdtheta / NL_chunk[:, None, :, None]  # weight by 1/(N*L)
+            else:
+                dNdtheta = dNdtheta / Ntot  # weight by 1/N (no leave-one-out)
+            if average_over_PE:
+                dNdtheta = np.mean(utils.to_numpy(dNdtheta), axis=-1)  # avg over PE
+                labels_padded = draw_ctx["labels_input"][b_idx][..., None]
+                dNdtheta = np.mean(
+                    aggregate_by_label(dNdtheta, labels_padded, ncomps=ncomps, comp_axis=1),
+                    axis=0,
+                )  # aggregate leaves by label, avg over draws -> (ncomps, nevs_chunk)
+                per_branch.append(dNdtheta)
+            else:
+                dNdtheta = xp.nansum(dNdtheta, axis=1)  # sum over leaves
+                dNdtheta = xp.mean(dNdtheta, axis=0)  # avg over draws -> (nevs_chunk, nsamples)
+                per_branch.append(utils.to_numpy(dNdtheta))
+        if average_over_PE:
+            per_branch = np.concatenate(per_branch, axis=0)  # (ncomps_tot, nevs_chunk)
+            per_branch = per_branch / np.sum(per_branch, axis=0)  # normalize over comps
+            per_ev.append(per_branch.T)
+        else:
+            per_branch = np.sum(np.stack(per_branch, axis=0), axis=0)  # sum over branches
+            per_ev.append(per_branch)
+        ev_idx = ev_end_idx
+
+    return np.concatenate(per_ev, axis=0)
+
+
+def compute_reweighted_event_samples(
+    draw_ctx, PE_samples, event_params,
+    n_reweighted_draws=1, ev_chunk_size=15, rng_seed=0,
+):
+    """Population-reweighted single-event posterior samples, in popsummary layout.
+
+    For each event i and each population draw m, the event's PE posterior is
+    importance-resampled by the per-draw, per-sample population weight
+    ``w[m,i,j] ∝ dN^m/dtheta_j / prior_j`` (summed over all branches and leaves),
+    and the resampled values of each parameter in ``event_params`` are stored.
+
+    The N*L leave-one-out factor is a per-(draw, event) constant that cancels when
+    ``w`` is normalized over the PE samples, so it does not change the resampled
+    samples and is omitted here -- the result already equals "with N*L applied".
+
+    Parameters
+    ----------
+    draw_ctx : dict
+        A single (sub)model's draw context (see ``compute_NL_event_likelihoods``).
+    PE_samples : dict
+        PE posterior samples, each of shape (nevs, nsamples), plus a "prior" key.
+    event_params : sequence of str
+        Event parameters (dimensions) to store, in order. ``mass_2_source`` and
+        ``mass_ratio`` are derived from the others if absent from ``PE_samples``.
+    n_reweighted_draws : int
+        Number of reweighted samples to draw per (event, population draw).
+    ev_chunk_size : int
+        Number of events processed at once (limits peak memory).
+    rng_seed : int
+        Seed for the resampling RNG.
+
+    Returns
+    -------
+    np.ndarray of shape (nevs, n_reweighted_draws, ndraws, len(event_params))
+        Matches popsummary's (events, draws, hypersamples, dimensions) layout for
+        ``PopulationResult.set_reweighted_event_samples``. The hypersamples axis
+        runs over the ndraws population draws of ``draw_ctx``.
+    """
+    nevs, nsamples = PE_samples["redshift"].shape
+    hps = [xp.asarray(v) for v in draw_ctx["samples_input"]]
+    ndraws = hps[0].shape[0]
+    rng = np.random.default_rng(rng_seed)
+
+    def _event_param(param):
+        if param in PE_samples:
+            return utils.to_numpy(PE_samples[param])
+        if param == "mass_2_source":
+            return utils.to_numpy(PE_samples["mass_1_source"] * PE_samples["mass_ratio"])
+        if param == "mass_ratio":
+            return utils.to_numpy(PE_samples["mass_2_source"] / PE_samples["mass_1_source"])
+        raise KeyError(f"Cannot obtain event parameter {param} from PE_samples")
+
+    # (nevs, nsamples, ndims) lookup table for resampled event-parameter values
+    param_stack = np.stack([_event_param(p) for p in event_params], axis=-1)
+
+    out = np.empty((nevs, n_reweighted_draws, ndraws, len(event_params)), dtype=np.float64)
+
+    ev_idx = 0
+    while ev_idx < nevs:
+        ev_end_idx = min(nevs, ev_idx + ev_chunk_size)
+        nevs_chunk = ev_end_idx - ev_idx
+        PE_samples_flat = {k: v[ev_idx:ev_end_idx].ravel() for k, v in PE_samples.items()}
+
+        w = 0.0
+        for b_idx in range(len(branch_names) - 1):
+            dNdtheta = 1.0
+            for param in ("mass", "chi_eff", "redshift"):
+                param_b_idx = b_idx if param in hp_ordering[b_idx] else -1
+                dNdtheta = dNdtheta * eval_param_model(PE_samples_flat, param_b_idx, param, hps)
+            dNdtheta = dNdtheta * hps[b_idx][..., -1, None]
+            dNdtheta = dNdtheta / PE_samples_flat["prior"]
+            dNdtheta = dNdtheta.reshape(dNdtheta.shape[:-1] + (nevs_chunk, nsamples))
+            dNdtheta = xp.nansum(dNdtheta, axis=1)  # sum over leaves -> (ndraws, nevs_chunk, nsamples)
+            w = w + dNdtheta
+        w = np.nan_to_num(utils.to_numpy(w), nan=0.0, posinf=0.0, neginf=0.0)
+
+        # normalize over PE samples -> per-(draw, event) resampling probabilities
+        wsum = w.sum(axis=-1, keepdims=True)
+        w = np.where(wsum > 0, w / np.where(wsum > 0, wsum, 1.0), 1.0 / nsamples)
+
+        # inverse-CDF importance resampling per (draw, event)
+        np.cumsum(w, axis=-1, out=w)
+        w[..., -1] = 1.0  # guard against floating-point drift
+        u = rng.random((ndraws, nevs_chunk, n_reweighted_draws))
+        for m in range(ndraws):
+            for c in range(nevs_chunk):
+                idx = np.searchsorted(w[m, c], u[m, c])
+                out[ev_idx + c, :, m, :] = param_stack[ev_idx + c, idx]
+        ev_idx = ev_end_idx
+
+    return out
+
+
 # def get_Ntot_by_label(hps, n_labelled_comps):
 #     if not branch_names:
 #         setup_data_module(model_name)
@@ -1090,8 +1330,8 @@ data_grid = {
 }
 
 
-def _extract_marg_ppd(
-    x_param, model_sig, model_ppds_dict, submodel_ppds_dict=None, comp_label=None
+def _extract_marg_pdf(
+    x_param, model_sig, model_ppds_dict, submodel_ppds_dict=None, comp_label=None, normalize=True
 ):
 
     if submodel_ppds_dict:
@@ -1109,15 +1349,25 @@ def _extract_marg_ppd(
         else:
             raise ValueError(f"Unrecognized component label {comp_label}")
 
-    if x_param == "redshift":
-        # for 2D we want to plot R(z) not psi(z)
-        zz = data_grid["redshift"]
-        res *= 4 * np.pi * Planck15.differential_comoving_volume(zz).value / 1e9 / (1 + zz)
+    # we want pdf, not rates
+    if normalize:
+        if x_param == "redshift":
+            zz = data_grid["redshift"]
+            res *= 4 * np.pi * Planck15.differential_comoving_volume(zz).value / 1e9 / (1 + zz)
+        else:
+            rates_dict = ppds_dict[f"{x_param}_labelled"][f"{model_sig} rates"]
+            if comp_label is None:
+                norm = np.sum(np.stack([rates_dict[comp] for comp in rates_dict], axis=0), axis=0)
+            else:
+                norm = rates_dict[comp_label]
+            res /= norm[..., None]
 
-    return res
+    # otherwise we have rate at z=0.2, and source-frame R(z) for redshift
+
+    return np.nan_to_num(res, nan=0)
 
 
-def _compute_mass_ppds(
+def _compute_mass_pdfs(
     x_param, y_param, draw_ctxs, model_ppds_dict, submodel_ppds_dict=None, model_sig=0
 ):
 
@@ -1144,13 +1394,9 @@ def _compute_mass_ppds(
 
     mass_ppds = {}
     for branch_idx, bn in enumerate(branch_names[:-1]):
-        branch_R02 = get_rates(branch_idx, hyperparams)  # (nsamples, ncomps)
         if "mass" in hp_ordering[branch_idx]:
             if "model" in hp_ordering[branch_idx]["mass"]:  # primary model
-                branch_xy_ppd = (
-                    utils.to_numpy(eval_param_model(mass_data, branch_idx, "mass", hyperparams))
-                    * branch_R02[..., None]
-                )  # this is R(m1, q)
+                branch_xy_ppd = utils.to_numpy(eval_param_model(mass_data, branch_idx, "mass", hyperparams)) # p(m1, q)
                 if "mass_2_source" in (x_param, y_param):  # convert to p(m1, m2)
                     branch_xy_ppd = branch_xy_ppd / utils.to_numpy(mass_data["mass_1_source"])
                 branch_xy_ppd = np.nan_to_num(branch_xy_ppd, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1179,6 +1425,7 @@ def plot_param_2D_contours_and_marginals(
     rasterize=True,
     comp_name_dict=None,
     idx_order=None,
+    popsummary_res=None, # update the popsummary object if passed
     **plot_kwargs,
 ):
 
@@ -1224,7 +1471,10 @@ def plot_param_2D_contours_and_marginals(
         [comp_name_dict.get(x, x) for x in comp_labels] if comp_name_dict else comp_labels
     )
 
-    comp_rates = draw_ctx["R02_labelled_draws"].T  # (nsamples, ncomps) -> (ncomps, nsamples)
+    if x_param == "redshift" or y_param == "redshift": # rate at z=0
+        comp_rates = comp_rates = draw_ctx["R0_labelled_draws"].T
+    else:
+        comp_rates = draw_ctx["R02_labelled_draws"].T  # (nsamples, ncomps) -> (ncomps, nsamples)
     model_sig_safe = utils.get_safe_fn(model_sig)  # for saving plots
     if submodel_ppds_dict:
         if model_sig in draw_ctxs["submodel"].keys():
@@ -1232,10 +1482,11 @@ def plot_param_2D_contours_and_marginals(
 
     if x_param.startswith("mass") and y_param.startswith("mass") and mass_ppds is None:
         # pre-compute mass ppds to save time in recursive calls
-        mass_ppds = _compute_mass_ppds(
+        mass_ppds = _compute_mass_pdfs(
             x_param,
             y_param,
-            model_ppds_dict,
+            draw_ctxs=draw_ctxs,
+            model_ppds_dict=model_ppds_dict,
             submodel_ppds_dict=submodel_ppds_dict,
             model_sig=model_sig,
         )
@@ -1260,12 +1511,12 @@ def plot_param_2D_contours_and_marginals(
             colors = model_ppds_dict["comp_labels"]["colors"]
 
         h, l = [], []
-        p_xy_mean_tot = 0.0
+        R_xy_mean_tot = 0.0
 
         for idx in idx_order:
 
             comp_label, color, alpha = comp_labels[idx], colors[idx], comp_alphas[idx]
-            axes, p_xy_mean = plot_param_2D_contours_and_marginals(
+            axes, R_xy_mean = plot_param_2D_contours_and_marginals(
                 x_param,
                 y_param,
                 model_sig,
@@ -1278,10 +1529,11 @@ def plot_param_2D_contours_and_marginals(
                 comp_label=comp_label,
                 mass_ppds=mass_ppds,
                 return_pxy_mean=True,
+                popsummary_res=popsummary_res,
                 **plot_kwargs | dict(alpha=alpha),
             )
-            p_xy_mean_tot = p_xy_mean_tot + p_xy_mean
-            if not np.all(np.isclose(p_xy_mean, 0.0, atol=1e-10)):
+            R_xy_mean_tot = R_xy_mean_tot + R_xy_mean
+            if not np.all(np.isclose(R_xy_mean, 0.0, atol=1e-10)):
                 h.append(
                     Patch(
                         facecolor=to_rgba(color, alpha=0.7 * alpha),
@@ -1302,18 +1554,18 @@ def plot_param_2D_contours_and_marginals(
             axes[0].savefig(os.path.join(figpath, savefig))
             print(f"Saved {savefig}")
         if return_pxy_mean:
-            return axes, p_xy_mean
+            return axes, R_xy_mean
         return axes
 
     # want to plot marginals on the side
-    p_x_marg = _extract_marg_ppd(
+    p_x_marg = _extract_marg_pdf(
         x_param,
         model_sig,
         model_ppds_dict,
         submodel_ppds_dict=submodel_ppds_dict,
         comp_label=comp_label,
     )
-    p_y_marg = _extract_marg_ppd(
+    p_y_marg = _extract_marg_pdf(
         y_param,
         model_sig,
         model_ppds_dict,
@@ -1327,28 +1579,28 @@ def plot_param_2D_contours_and_marginals(
 
     if x_param.startswith("mass") and y_param.startswith("mass"):
         if comp_label is None:  # just want total
-            p_xy = [
+            R_xy = [
                 np.nansum(b_ppd, axis=1) for b_ppd in mass_ppds.values()
             ]  # add components together
-            p_xy = np.sum(np.stack(p_xy), axis=0)  # add branches together
+            R_xy = np.sum(np.stack(R_xy), axis=0)  # add branches together
         else:  # have to extract component from labels
             comp_idx = comp_labels.index(comp_label)
             bn, b_label_idx = model_ppds_dict["comp_labels"]["comp_sigs"][comp_idx]
             labels = draw_ctx["labels_input"][branch_names.index(bn)]
             mask = (labels == b_label_idx)[..., None, None]
-            p_xy = np.nansum(mass_ppds[bn] * mask, axis=1)
+            R_xy = np.nansum(mass_ppds[bn] * mask, axis=1)
     else:
         if (comp_label is None) and not (x_global and y_global) and rj_branches:
-            p_xy = 0.0
+            R_xy = 0.0
             for comp_label_, comp_rate in zip(comp_labels, comp_rates, strict=True):
-                comp_x_ppd = _extract_marg_ppd(
+                comp_x_ppd = _extract_marg_pdf(
                     x_param,
                     model_sig,
                     model_ppds_dict,
                     submodel_ppds_dict=submodel_ppds_dict,
                     comp_label=comp_label_,
                 )
-                comp_y_ppd = _extract_marg_ppd(
+                comp_y_ppd = _extract_marg_pdf(
                     y_param,
                     model_sig,
                     model_ppds_dict,
@@ -1359,28 +1611,57 @@ def plot_param_2D_contours_and_marginals(
                     comp_rate[:, None, None] > 0,
                     np.expand_dims(comp_x_ppd, 2)
                     * np.expand_dims(comp_y_ppd, 1)
-                    / comp_rate[:, None, None],
+                    * comp_rate[:, None, None], 
                     0.0,
                 )
-                p_xy = p_xy + comp_xy_ppd
+                R_xy = R_xy + comp_xy_ppd
         else:
-            R02_tot = draw_ctx["R02_tot_draws"]
-            p_xy = (
-                np.expand_dims(p_x_marg, 2) * np.expand_dims(p_y_marg, 1) / R02_tot[:, None, None]
+            tot_rate = np.nansum(comp_rates, axis=0)
+            R_xy = (
+                np.expand_dims(p_x_marg, 2) * np.expand_dims(p_y_marg, 1) * tot_rate[:, None, None]
             )
 
-    p_xy_mean = np.nanmean(p_xy, axis=0)
-    if np.all(np.isclose(p_xy_mean, 0.0, atol=1e-10)):
+    R_xy_mean = np.nanmean(R_xy, axis=0)
+    if not np.any(R_xy_mean > 1e-6):
         print(
-            f"WARNING: PDF is zero for {x_param} vs {y_param} for model `{model_sig}` and component `{comp_label}`."
+            f"PDF is zero for {x_param} vs {y_param} for model `{model_sig}` and component `{comp_label}`, skipping"
         )
     else:
+
+        # update popsummary object if passed
+        if popsummary_res is not None:
+
+            if not (comp_label is None or (x_global and y_global)):
+                k = f"{x_param}_{y_param}_joint_{utils.get_safe_fn(comp_label)}"
+                desc = f"Total differential merger rate in {x_param} and {y_param}"
+            else:
+                k = f"{x_param}_{y_param}_joint"
+                desc = f"Differential merger rate in {x_param} and {y_param} of component {comp_label} "
+            
+            # update 2D
+            if k not in popsummary_res.get_rates_on_grids_keys(verbose=False):
+                xx_, yy_ = np.meshgrid(xx, yy)
+                xxyy = np.vstack([xx_.ravel(), yy_.ravel()]) # (2, ngrid^2)
+                R_xy_ = R_xy.reshape(R_xy.shape[0], -1) # (ndraw, ngrid^2)
+                if not (x_param == "redshift" or y_param == "redshift"):
+                    desc += " at z=0.2"
+                popsummary_res.set_rates_on_grids(
+                    k, 
+                    grid_params=[x_param, y_param], 
+                    positions=xxyy, 
+                    rates=R_xy_, 
+                    attribute_keys="description", 
+                    attributes=desc,
+                    hyperparameter_sample_idx_map=draw_ctx["sel_inds_of_model_inds"] # we only use an ndraws subset of the total samples to compute the posterior rates
+                )
+                print(f"Updated popsummary file {popsummary_res.fname} for submodel {model_sig} with key {k}")
+
         axes = plot.plot_2D_contours_and_marginals(
             xx,
             yy,
             p_x_marg,
             p_y_marg,
-            p_xy_mean,
+            R_xy_mean,
             color=color,
             axes=axes,
             rasterize_ppds=rasterize,
@@ -1408,6 +1689,210 @@ def plot_param_2D_contours_and_marginals(
         print(f"Saved {savefig}")
 
     if return_pxy_mean:
-        return axes, p_xy_mean
+        return axes, R_xy_mean
 
     return axes
+
+# ----------------------------
+# -------- popsummary --------
+# ----------------------------
+
+def get_popsummary_fn(model_sig, outdir):
+    return os.path.join(outdir, "data", f"popsummary_{utils.get_safe_fn(model_sig)}.h5")
+
+
+def initialize_popsummary(
+    megadict,
+    model_ppds_dict,
+    submodel_ppds_dict,
+    submodel_draw_ctxs,
+    submodel_sig_name,
+    main_input_args,
+    outdir,
+    popmodel_label=None,
+    **kwargs,
+):
+    """Create a LIGO ``popsummary`` :class:`PopulationResult` file for one submodel.
+
+    Builds the HDF5 result for the submodel identified by ``submodel_sig_name``,
+    writing (i) the population hyperparameter posterior samples (with one copy of
+    each local/RJ-branch hyperparameter block per labelled component), and
+    (ii) the 1D marginal differential merger rates ``dR/dx`` on a grid for every
+    population parameter, both in total and per labelled component.
+
+    Reweighted single-event posteriors are *not* written here; add those to the
+    returned object separately (see :func:`set_popsummary_reweighted_posteriors`).
+
+    Parameters
+    ----------
+    megadict : dict
+        Contents of ``samples_and_labels.npy``. Uses ``samples`` (per-branch
+        hyperparameter samples, shape ``(nsamples, ncomps, nhp)``), ``labels``
+        (per-branch k-means component labels, shape ``(nsamples, ncomps)``),
+        ``submodel_sig_names`` and ``submodel_inds`` (posterior-sample indices
+        belonging to each submodel).
+    model_ppds_dict, submodel_ppds_dict : dict
+        Model-level and submodel-level PPD dicts (``ppds.npy`` /
+        ``ppds_submodels.npy``). Provide component metadata (``comp_labels``) and
+        the 1D marginal rates via :func:`_extract_marg_pdf`.
+    submodel_draw_ctxs : dict
+        Submodel draw-context dict (``submodel_draw_ctxs.npy``). The entry for
+        ``submodel_sig_name`` supplies ``sel_inds_of_model_inds``, mapping the
+        ndraws PPD subset back into the full hyperparameter sample set.
+    submodel_sig_name : str
+        Submodel signature, e.g. ``"A, B, C"`` or ``"PL A, gauss B"``; its
+        comma-separated entries are the labelled component names.
+    main_input_args : argparse.Namespace
+        ``main.py`` CLI args. Uses ``PE_samples`` to locate the
+        ``*_event_waveforms.txt`` event/waveform list in the same directory.
+    outdir : str
+        The run output directory (the one containing ``data/``), i.e. main.py's
+        ``outdir`` (``args.outdir/<label>[_test]``); the result is written to
+        ``<outdir>/data/popsummary_<sig>.h5``.
+    popmodel_label : str, optional
+        Stored under the ``population_model`` metadata key.
+    **kwargs
+        Forwarded to the :class:`PopulationResult` constructor.
+
+    Returns
+    -------
+    PopulationResult
+        Initialized result, already populated with hyperparameter samples and 1D
+        marginal rates.
+    """
+
+    # load in events and waveforms, assuming it's the same directory as PE_samples
+    events, waveforms = None, None
+    lvk_processed_dir = os.path.dirname(main_input_args.PE_samples)
+    for fn in sorted(os.listdir(lvk_processed_dir), reverse=True):
+        if fn.endswith("_event_waveforms.txt"):
+            wf_fn = os.path.join(lvk_processed_dir, fn)
+            events, waveforms = np.loadtxt(wf_fn, dtype=str, usecols=(0, 1), unpack=True)
+            # h5py cannot store numpy fixed-width unicode arrays; use python str lists
+            events, waveforms = events.tolist(), waveforms.tolist()
+            break
+
+    comp_label_info = model_ppds_dict["comp_labels"]
+    submodel_inds = megadict["submodel_inds"][
+        megadict["submodel_sig_names"].index(submodel_sig_name)
+    ]
+    samples = {k: v[submodel_inds] for k, v in megadict["samples"].items()}
+    labels = {k: v[submodel_inds] for k, v in megadict["labels"].items()}
+
+    # the labelled components of this submodel, kept in signature order
+    comp_names = submodel_sig_name.split(", ")
+    name_to_sig = dict(
+        zip(comp_label_info["comp_names"], comp_label_info["comp_sigs"], strict=True)
+    )
+    comp_sigs = [name_to_sig[name] for name in comp_names]
+
+    # population parameters that have a plotting grid and PPDs
+    grid_params = [p for p in data_grid if p in model_ppds_dict]
+
+    # build hyperparameter metadata and samples, one column block per
+    # (branch, component); RJ branches get one block per labelled component.
+    hyperparameter_latex_labels = []
+    hyperparameter_descriptions = []
+    hyperparameter_units = []
+    model_names = []
+    hp_vals = []
+
+    for bn, branch_hp_ordering in zip(branch_names, hp_ordering, strict=True):
+        if nleaves_max_dict[bn] <= 1:
+            hyperparameter_latex_labels.extend(branch_hp_ordering["__latex__"])
+            hyperparameter_descriptions.extend(branch_hp_ordering["__desc__"])
+            hyperparameter_units.extend(branch_hp_ordering["__unit__"])
+            hp_vals.append(samples[bn][:, 0, :])  # (nsamples, ncomp, nhp) -> (nsamples, nhp)
+        else:
+            # add a copy of the branch's hyperparameters for each component
+            for comp_name, comp_sig in zip(comp_names, comp_sigs, strict=True):
+                if comp_sig[0] != bn:
+                    continue
+                hyperparameter_latex_labels.extend(
+                    [plot.add_superscript(x, comp_name) for x in branch_hp_ordering["__latex__"]]
+                )
+                hyperparameter_descriptions.extend(branch_hp_ordering["__desc__"])
+                hyperparameter_units.extend(branch_hp_ordering["__unit__"])
+                # select the single leaf assigned this component for each sample
+                mask = labels[bn] == comp_sig[1]
+                hp_vals.append(samples[bn][mask])  # (nsamples, nhp)
+
+        # human-readable model descriptors for this branch
+        branch_models, branch_params = utils.recursive_get(
+            branch_hp_ordering, "model_name", return_superkey=True
+        )
+        model_names.extend(
+            [f"[{m}, branch {bn}] {p}" for m, p in zip(branch_models, branch_params, strict=True)]
+        )
+
+    hp_vals = np.concatenate(hp_vals, axis=1)  # (nsamples, total_nhp)
+
+    # short, file-safe hyperparameter names derived from the latex labels
+    hyperparameters = []
+    for x in hyperparameter_latex_labels:
+        name = x.replace(r"\textsc", "").strip(r"$\{}").replace("^", "_")
+        hyperparameters.append(utils.get_safe_fn(name))
+
+    fn = get_popsummary_fn(submodel_sig_name, outdir)
+
+    res = PopulationResult(
+        fname=fn,
+        hyperparameters=hyperparameters,
+        hyperparameter_descriptions=hyperparameter_descriptions,
+        hyperparameter_units=hyperparameter_units,
+        hyperparameter_latex_labels=hyperparameter_latex_labels,
+        references=["https://arxiv.org/abs/2605.25980"],
+        model_names=model_names,
+        events=events,
+        event_waveforms=waveforms,
+        event_parameters=grid_params,
+        **kwargs,
+    )
+
+    if popmodel_label is not None:
+        res.set_metadata("population_model", popmodel_label)
+
+    # input hyperparameters
+    res.set_hyperparameter_samples(hp_vals)
+
+    # input 1d marginalized rates dR/dx (per component, and total).
+    # we only use an ndraws subset of the full samples for the posterior rates,
+    # mapped back via sel_inds_of_model_inds.
+    draw_ctx = submodel_draw_ctxs[submodel_sig_name]
+    hp_sample_idx_map = draw_ctx["sel_inds_of_model_inds"]
+
+    def _set_rate(k, param, rates, desc):
+        res.set_rates_on_grids(
+            k,
+            grid_params=param,
+            positions=data_grid[param],
+            rates=rates,
+            attribute_keys="description",
+            attributes=desc,
+            hyperparameter_sample_idx_map=hp_sample_idx_map,
+        )
+
+    for param in grid_params:
+        z_note = "" if param == "redshift" else " at z=0.2"
+        if "ppd" in model_ppds_dict[param]:
+            # global parameter: a single shared rate, no per-component breakdown
+            total = _extract_marg_pdf(
+                param, submodel_sig_name, model_ppds_dict, submodel_ppds_dict,
+                comp_label=None, normalize=False,
+            )
+        else:
+            # local parameter: per-component rates summed to the submodel total
+            total = 0.0
+            for comp_name in comp_names:
+                rates = _extract_marg_pdf(
+                    param, submodel_sig_name, model_ppds_dict, submodel_ppds_dict,
+                    comp_label=comp_name, normalize=False,
+                )
+                _set_rate(
+                    f"{param}_{comp_name}", param, rates,
+                    f"differential merger rate in {param} of component {comp_name}{z_note}",
+                )
+                total = total + rates
+        _set_rate(param, param, total, f"total differential merger rate in {param}{z_note}")
+
+    return res
