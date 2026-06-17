@@ -126,7 +126,7 @@ else:
 
 if not os.path.exists(priorpath):
     raise FileNotFoundError(f"Prior file {priorpath} not found")
-    
+
 with open(priorpath, "r") as f:
     # this should be a list of dictionaries, one for each branch, the last of which should be global
     # each dictionary should have keys corresponding to each model (mass, q, chieff, rate), with the value as a subdictionary
@@ -159,6 +159,11 @@ if (not args.test) and (not PLOT_ONLY):  # don't overwrite if just replotting
 # ----------------------------------------
 # LOAD IN DATA - PE samples and injections
 # ----------------------------------------
+
+for attr in ["PE_samples", "injs"]:
+    path = getattr(args, attr)
+    if not os.path.exists(path):
+        setattr(args, attr, os.path.join(cfg.get("lvk_out_path"), path))
 
 params = sorted(list(data.params))
 with np.load(args.PE_samples) as f:
