@@ -17,8 +17,9 @@ dependencies = [
     "scikit-learn",
     "eryn",
     "popsummary",
-    "cupy-cuda13x",
+    "cupy-cuda13x[ctk]",
     "KDEpy",
+    "requests>=2.34.2",
 ]
 
 [tool.hatch.build.targets.wheel]
