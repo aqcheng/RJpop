@@ -1642,7 +1642,7 @@ def plot_param_2D_contours_and_marginals(
             if k not in popsummary_res.get_rates_on_grids_keys(verbose=False):
                 xx_, yy_ = np.meshgrid(xx, yy)
                 xxyy = np.vstack([xx_.ravel(), yy_.ravel()]) # (2, ngrid^2)
-                R_xy_ = R_xy.reshape(R_xy.shape[0], -1) # (ndraw, ngrid^2)
+                R_xy_ = np.swapaxes(R_xy, 1, 2).reshape(R_xy.shape[0], -1) # (ndraw, ngrid^2)
                 if not (x_param == "redshift" or y_param == "redshift"):
                     desc += " at z=0.2"
                 popsummary_res.set_rates_on_grids(
@@ -1889,7 +1889,7 @@ def initialize_popsummary(
                     comp_label=comp_name, normalize=False,
                 )
                 _set_rate(
-                    f"{param}_{comp_name}", param, rates,
+                    f"{param}_{utils.get_safe_fn(comp_name)}", param, rates,
                     f"differential merger rate in {param} of component {comp_name}{z_note}",
                 )
                 total = total + rates

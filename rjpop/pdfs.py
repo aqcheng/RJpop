@@ -581,6 +581,123 @@ class SGED(trunc_dist):
         return 0.0, xp.sqrt(var)
 
 
+class skew_gaussian(trunc_dist):
+    r"""
+    Skew-normal effective spin distribution: a skewed, ``[xmin, xmax]``-truncated
+    Gaussian. The (un-truncated) density is
+
+    .. math::
+
+        \pi(x \mid \mu, \sigma, \epsilon) \propto
+        \begin{cases}
+        (1 + \epsilon)\, \mathcal{N}(x \mid \mu, \sigma(1 + \epsilon)) & x \le 0, \\
+        (1 - \epsilon)\, \mathcal{N}(x \mid \mu, \sigma(1 - \epsilon)) & x \ge 0,
+        \end{cases}
+
+    where :math:`\mu` (``loc``) and :math:`\sigma` (``scale``) set the location
+    and scale and :math:`\epsilon` (``epsilon``) is the skew parameter:
+    :math:`\epsilon > 0` gives more support at :math:`x < \mu`, while
+    :math:`\epsilon < 0` gives more support at :math:`x > \mu`. The distribution
+    reduces to a standard, symmetric Gaussian when :math:`\epsilon = 0`.
+
+    Because the piecewise split is at :math:`x = 0` (not at :math:`\mu`), this is
+    not a location-scale family, so the ``loc`` / ``scale`` / truncation handling
+    of ``trunc_dist`` is reimplemented here directly. Note that the :math:`1 \pm
+    \epsilon` prefactor cancels the :math:`1 / (1 \pm \epsilon)` from the per-side
+    scale, leaving an overall :math:`1 / \sigma`.
+
+    See e.g. Callister et al. 2021b, Adamcewicz & Thrane 2022, Banagiri et al.
+    2025 (Eq. B37) for observational motivation.
+    """
+
+    @staticmethod
+    def _side_scales(scale, epsilon):
+        # left scale (x <= 0) and right scale (x >= 0)
+        return scale * (1 + epsilon), scale * (1 - epsilon)
+
+    @staticmethod
+    def _base_logpdf(x, loc, scale, epsilon):
+        # log of the un-truncated skew density g(x), with the (1 +/- eps)
+        # prefactor folded in (it cancels the 1/(1 +/- eps) of the per-side scale).
+        s_left, s_right = skew_gaussian._side_scales(scale, epsilon)
+        s = xp.where(x <= 0, s_left, s_right)
+        z = (x - loc) / s
+        return -0.5 * z**2 - 0.5 * xp.log(2 * xp.pi) - xp.log(scale)
+
+    @staticmethod
+    def _base_cdf(x, loc, scale, epsilon):
+        # G(x) = integral_{-inf}^{x} g(x') dx', the un-normalized base CDF.
+        x = xp.asarray(x)
+        s_left, s_right = skew_gaussian._side_scales(scale, epsilon)
+        g0 = (1 + epsilon) * special.ndtr(-loc / s_left)  # base mass below x = 0
+        left = (1 + epsilon) * special.ndtr((x - loc) / s_left)
+        right = g0 + (1 - epsilon) * (
+            special.ndtr((x - loc) / s_right) - special.ndtr(-loc / s_right)
+        )
+        return xp.where(x <= 0, left, right)
+
+    # standard (loc=0, scale=1) form, kept to satisfy the dist/trunc_dist interface
+    @staticmethod
+    def _pdf(x, epsilon=0.0):
+        return xp.exp(skew_gaussian._base_logpdf(x, 0.0, 1.0, epsilon))
+
+    @staticmethod
+    def _logpdf(x, epsilon=0.0):
+        return skew_gaussian._base_logpdf(x, 0.0, 1.0, epsilon)
+
+    @staticmethod
+    def _cdf(x, epsilon=0.0):
+        return skew_gaussian._base_cdf(x, 0.0, 1.0, epsilon)
+
+    @classmethod
+    def pdf(cls, x, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
+        norm = cls._base_cdf(xmax, loc, scale, epsilon) - cls._base_cdf(
+            xmin, loc, scale, epsilon
+        )
+        pdf = xp.exp(cls._base_logpdf(x, loc, scale, epsilon))
+        pdf *= (x >= xmin) & (x <= xmax)
+        norm = xp.where(norm > 0, norm, xp.inf)  # guard degenerate truncation
+        return pdf / norm
+
+    @classmethod
+    def logpdf(cls, x, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
+        norm = cls._base_cdf(xmax, loc, scale, epsilon) - cls._base_cdf(
+            xmin, loc, scale, epsilon
+        )
+        logpdf = cls._base_logpdf(x, loc, scale, epsilon) - xp.log(norm)
+        logpdf = xp.where((x < xmin) | (x > xmax), -INF, logpdf)
+        return xp.where(norm > 0, logpdf, -INF)
+
+    @classmethod
+    def cdf(cls, x, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
+        G_lo = cls._base_cdf(xmin, loc, scale, epsilon)
+        G_hi = cls._base_cdf(xmax, loc, scale, epsilon)
+        norm = xp.where(G_hi - G_lo > 0, G_hi - G_lo, xp.inf)
+        return xp.clip((cls._base_cdf(x, loc, scale, epsilon) - G_lo) / norm, 0.0, 1.0)
+
+    @classmethod
+    def ppf(cls, q, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
+        s_left, s_right = cls._side_scales(scale, epsilon)
+        G_lo = cls._base_cdf(xmin, loc, scale, epsilon)
+        G_hi = cls._base_cdf(xmax, loc, scale, epsilon)
+        # invert the un-normalized base CDF at the rescaled quantile target
+        t = G_lo + xp.clip(xp.asarray(q), EPS, 1 - EPS) * (G_hi - G_lo)
+        t = xp.asarray(t)
+        g0 = (1 + epsilon) * special.ndtr(-loc / s_left)
+        left = loc + s_left * special.ndtri(xp.clip(t / (1 + epsilon), EPS, 1 - EPS))
+        right_q = special.ndtr(-loc / s_right) + (t - g0) / (1 - epsilon)
+        right = loc + s_right * special.ndtri(xp.clip(right_q, EPS, 1 - EPS))
+        return xp.where(t <= g0, left, right)
+
+    @classmethod
+    def moments(cls, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
+        # robust (quantile-based) location/scale, since the mean != loc when skewed
+        kwargs = dict(epsilon=epsilon, loc=loc, scale=scale, xmin=xmin, xmax=xmax)
+        median = cls.ppf(0.5, **kwargs)
+        std = (cls.ppf(0.84, **kwargs) - cls.ppf(0.16, **kwargs)) / 2
+        return median, std
+
+
 class powerlaw:
 
     @staticmethod
@@ -1431,6 +1548,16 @@ MODELS = {
         },
         "gauss": {
             "model": gaussian(),
+            "params_fix": {"xmin": -1.0, "xmax": 1.0},
+        },
+        "skew_gauss": {
+            "model": skew_gaussian(),
+            "param_latex": {
+                "epsilon": r"$\epsilon_{\chi}$",
+            },
+            "param_desc": {
+                "epsilon": "chi_eff skew parameter (>0 favors chi_eff < mean)",
+            },
             "params_fix": {"xmin": -1.0, "xmax": 1.0},
         },
     },

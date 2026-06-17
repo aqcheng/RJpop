@@ -78,7 +78,7 @@ parser.add_argument('--nsteps', '-nsteps', type=int, default=2000, help='Number 
 parser.add_argument('--burn', '-burn', type=int, default=0, help='Number of burn-in steps.')
 parser.add_argument('--kde_update', type=int, default=0, help='Every kde_update steps, update the KDE from which the reversible jump moves are proposed. Default: 0 (never update, use prior for rj proposals)')
 parser.add_argument('--discard', '-discard', type=int, default=None, help='Number of steps to discard in post. Default: None (determine automatically)')
-parser.add_argument('--outdir', '-outdir', type=str, help='Output directory')
+parser.add_argument('--outdir', '-outdir', type=str, default=cfg.get("RJpop_out_path"), help='Output directory. Uses RJpop_out_path from config.json if not specified.')
 parser.add_argument('--cpu', action='store_true', help='Force CPU instead of GPU')
 
 # Hyperparameters
@@ -119,7 +119,15 @@ os.makedirs(datapath, exist_ok=True)
 # -----------------------------
 
 # load in and setup prior
-with open(args.prior, "r") as f:
+if os.path.exists(args.prior):
+    priorpath = args.prior
+else:
+    priorpath = os.path.join(cfg.get("RJpop_out_path"), "_priors", args.prior)
+
+if not os.path.exists(priorpath):
+    raise FileNotFoundError(f"Prior file {priorpath} not found")
+    
+with open(priorpath, "r") as f:
     # this should be a list of dictionaries, one for each branch, the last of which should be global
     # each dictionary should have keys corresponding to each model (mass, q, chieff, rate), with the value as a subdictionary
     # each dictionary should also have a "__branch__" key corresponding to the branch name
@@ -599,8 +607,7 @@ nsamples = logP[:, 0].size
 utils.print_to(logpath, f"Using thin {thin} and discard {discard} ({nsamples} samples)")
 
 
-REPLOT = args.replot or (args.nsteps + args.burn > 0)
-
+REPLOT = args.replot or not PLOT_ONLY
 
 def save_or_not(path):  # determine if it needs to be replotted
     if "/" not in path:

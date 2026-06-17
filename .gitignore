@@ -1,11 +1,10 @@
 scratch/*
 .ipynb_checkpoints
 .vscode
-scripts/test*
+# scripts/test*
 scripts/ref*
 submit/
 __pycache__/
-*.toml
 submit.sh
 data_release
 config.json
