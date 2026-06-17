@@ -91,6 +91,7 @@ parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), he
 # parser.add_argument('--lvk_res_path', type=str, default=lvk_res_path_default, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
 parser.add_argument('--popsummary_path', type=str, default=None, help='Path to the popsummary directory for LVK results. Retrieves from config.json [o4b-astro_path]/popsummary_files, then falls back to [o4a-astro_path]/data_release by default')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
+parser.add_argument('--plot-only', action='store_true', help='Plot only, assuming there is already a results file; overrides args.nsteps and args.nburn')
 parser.add_argument('--replot', action='store_true', help='(Re)plot all the ppds, even if the plots already exist')
 parser.add_argument('--corner_param', type=int, nargs='+', default=None, help='An additional parameter to plot across all components. Should be a list of indices, corresponding to the parameter index of each branch in order. (-1 to skip branch)')
 parser.add_argument('--rasterize', type=int, default=1, help='Whether (1) or not (0) to rasterize the ppd plots. Default: 1')
@@ -135,8 +136,10 @@ with open(args.prior, "r") as f:
 # process input prior
 priors, covs_all = data.process_input_priordict(input_priordicts, rate_prior=args.rate_prior)
 
+PLOT_ONLY = args.plot_only | (args.nsteps + args.burn == 0)
+
 # save hp_ordering, latex parameter names, and nleaves_min_max of each branch
-if (not args.test) and (args.nsteps + args.burn):  # don't overwrite if just replotting
+if (not args.test) and (not PLOT_ONLY):  # don't overwrite if just replotting
     with open(os.path.join(outdir, "hyperparameter_ordering_metainfo.json"), "w") as f:
         json.dump(data.hp_ordering, f, indent=4, default=lambda x: str(x.__class__))
     with open(os.path.join(outdir, "nleaves_min_max.json"), "w") as f:
@@ -443,7 +446,7 @@ ensemble_kwargs = dict(
     track_moves=not (args.kde_update > 0),
 )
 
-if nsteps + burn:
+if not PLOT_ONLY:
     # this wrapper is just to handle errors in case of incompatible existing backend
     ensemble = utils.EnsembleSamplerWrapper(**ensemble_kwargs)
     if args.kde_update > 0 and rj_moves:
