@@ -582,7 +582,7 @@ def plot_all_param_ppds(
         for comp_name, color, ppds in comps:
             label = comp_name if labeldict is None else labeldict.get(comp_name, comp_name)
             plot_ppds(comp_ax, x, ppds / norm, color=color, CI=None,
-                      label=textsc_ify(label), rasterize=rasterize, line_alpha=0.1 * 500 / ppds.shape[0])
+                      label=textsc_ify(label), rasterize=rasterize, line_alpha=0.1)
         if np.any(tot_ppds):
             plot_ppds(tot_ax, x, tot_ppds / norm, color="cornflowerblue",
                       CI=90, lw=0.7, secondary_lw=0.7, label="Total")

@@ -436,12 +436,10 @@ class gaussian(trunc_dist):
     @staticmethod
     def _ppf(q):
         return special.ndtri(q)
-
-    @classmethod
-    def moments(cls, loc=0, scale=1, xmin=-INF, xmax=INF):
-        kwargs = dict(loc=loc, scale=scale, xmin=xmin, xmax=xmax)
-        return loc, (cls.ppf(0.84, **kwargs) - cls.ppf(0.16, **kwargs)) / 2
-        # ppf is already scaled
+    
+    @staticmethod
+    def _moments(**kwargs):
+        return 0, 1
 
 
 class gen_gaussian(trunc_dist):
@@ -606,8 +604,7 @@ class skew_gaussian(trunc_dist):
     \epsilon` prefactor cancels the :math:`1 / (1 \pm \epsilon)` from the per-side
     scale, leaving an overall :math:`1 / \sigma`.
 
-    See e.g. Callister et al. 2021b, Adamcewicz & Thrane 2022, Banagiri et al.
-    2025 (Eq. B37) for observational motivation.
+    See Banagiri et al. 2025 (Eq. B37).
     """
 
     @staticmethod
@@ -689,13 +686,9 @@ class skew_gaussian(trunc_dist):
         right = loc + s_right * special.ndtri(xp.clip(right_q, EPS, 1 - EPS))
         return xp.where(t <= g0, left, right)
 
-    @classmethod
-    def moments(cls, epsilon=0.0, loc=0, scale=1, xmin=-INF, xmax=INF):
-        # robust (quantile-based) location/scale, since the mean != loc when skewed
-        kwargs = dict(epsilon=epsilon, loc=loc, scale=scale, xmin=xmin, xmax=xmax)
-        median = cls.ppf(0.5, **kwargs)
-        std = (cls.ppf(0.84, **kwargs) - cls.ppf(0.16, **kwargs)) / 2
-        return median, std
+    @staticmethod
+    def _moments(*args, **kwargs):
+        return 0, 1
 
 
 class powerlaw:
