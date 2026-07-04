@@ -58,17 +58,27 @@ git clone https://github.com/aqcheng/RJpop.git
 or simply download it.
 
 **Dependencies:**
+
+The easiest way to install all dependencies is using [uv](https://docs.astral.sh/uv). Once `uv` is installed, simply run
+
+```bash
+uv sync
+```
+
+which installs all dependencies reading from the `pyproject.toml` and `uv.lock` files.
+
+Alternatively, one can install dependencies manually:
 - [Eryn](https://github.com/mikekatz04/Eryn) — the ensemble sampler backend
 - Standard scientific Python stack: `numpy`, `scipy`, `astropy`, `h5py`, `matplotlib`, `seaborn`, `corner`, `sklearn`
 - Optional: `cupy` for GPU acceleration
 - Optional: `popsummary` for overlaying LVK reference results on plots
 
-Install Eryn from source:
+To install Eryn from source:
 ```bash
 git clone https://github.com/mikekatz04/Eryn
 pip install -e Eryn/
 ```
-or alternatively, `uv pip install -e Eryn/`.
+or `uv pip install -e Eryn/` if using `uv`.
 
 ## Usage
 

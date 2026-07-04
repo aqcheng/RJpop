@@ -2,14 +2,11 @@ import argparse
 import builtins
 import json
 import os
-from glob import glob
-
 import sys
+from glob import glob
 
 if ("--cpu" in sys.argv) or ("-cpu" in sys.argv):
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-import data
 
 # packages for post-processing
 import matplotlib as mpl
@@ -23,11 +20,13 @@ from eryn.moves import (
     StretchMove,
 )
 from eryn.state import State
+from load_config import load_config
 from moves import RateMove, UpdateKDEMove
 from pdfs import INF, RATE_FACTOR
 from xp import xp
 
-from rjpop.load_config import load_config
+import data
+
 cfg = load_config()
 
 mpl.use("Agg")
