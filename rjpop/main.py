@@ -74,16 +74,15 @@ parser.add_argument('--ntemps', '-ntemps', type=int, default=5, help='Number of 
 parser.add_argument('--Tmax', default=None, type=float, help='Maximum temperature (for parallel tempering)')
 parser.add_argument('--rj_num_try', default=1, type=int, help='Number of tries for MT MCMC')
 parser.add_argument('--group_chunk_size', type=int, default=None, help='Evaluate the likelihood in batches of at most this many groups (temperature x walker x rj_num_try combinations) to cap peak GPU memory. Default: None (all groups in one pass). Lower it if you hit out-of-memory errors during RJ moves.')
-parser.add_argument('--nsteps', '-nsteps', type=int, default=2000, help='Number of steps')
-parser.add_argument('--burn', '-burn', type=int, default=0, help='Number of burn-in steps.')
+parser.add_argument('--nsteps', '-nsteps', type=int, default=20000, help='Number of steps')
+parser.add_argument('--burn', '-burn', type=int, default=20000, help='Number of burn-in steps.')
 parser.add_argument('--kde_update', type=int, default=0, help='Every kde_update steps, update the KDE from which the reversible jump moves are proposed. Default: 0 (never update, use prior for rj proposals)')
 parser.add_argument('--discard', '-discard', type=int, default=None, help='Number of steps to discard in post. Default: None (determine automatically)')
 parser.add_argument('--outdir', '-outdir', type=str, default=cfg.get("RJpop_out_path"), help='Output directory. Uses RJpop_out_path from config.json if not specified.')
 parser.add_argument('--cpu', action='store_true', help='Force CPU instead of GPU')
 
 # Hyperparameters
-parser.add_argument('--use_mchirp', action='store_true', help='Use chirp mass instead of m1 - not currently implemented')
-parser.add_argument('--min_sep', '--minsep', type=float, default=3.0, help='Enforce a minimum separation in feature space between components. Default: 3')
+parser.add_argument('--min_sep', '--minsep', type=float, default=1, help='Enforce a minimum separation in feature space between components. Default: 3')
 parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), help="The minimum and maximum rate for the rate prior of each component. Default: (0.05, 100)")
 
 # plotting options
@@ -535,10 +534,8 @@ if not PLOT_ONLY:
             logP = ensemble.get_log_posterior()[:, 0]
         else:
             converged = True
+            del ensemble
 
-        # print diagnostics
-
-        del ensemble
 else:
     logP = backend.get_log_posterior()[:, 0]
     discard = utils.get_discard_from_chain(logP) if args.discard is None else args.discard

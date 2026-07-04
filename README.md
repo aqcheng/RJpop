@@ -51,6 +51,12 @@ examples/
 
 ## Installation
 
+To install this code, simply `git clone` this repository
+```bash
+git clone https://github.com/aqcheng/RJpop.git
+```
+or simply download it.
+
 **Dependencies:**
 - [Eryn](https://github.com/mikekatz04/Eryn) — the ensemble sampler backend
 - Standard scientific Python stack: `numpy`, `scipy`, `astropy`, `h5py`, `matplotlib`, `seaborn`, `corner`, `sklearn`
@@ -62,25 +68,43 @@ Install Eryn from source:
 git clone https://github.com/mikekatz04/Eryn
 pip install -e Eryn/
 ```
+or alternatively, `uv pip install -e Eryn/`.
 
 ## Usage
 
 ### 1. Prepare data
 
-Process LVK parameter estimation samples and injections into the NPZ format expected by the sampler:
+The scripts in the `scripts` directory are used to process the LVK parameter estimation samples and injections into the format expected by the sampler. The path to the data files, as well as the target output paths, can be specified as arguments to the script, e.g.
 
 ```bash
-python scripts/process_GWTC_PE.py --in_path /path/to/lvk/samples --out_path ./data
-python scripts/process_GWTC_injs.py  # edit inpath/outpath at top of script
+python scripts/process_GWTC_PE.py --in_paths /path/to/lvk/PE/samples/1 /path/to/lvk/PE/samples/2 --out_path /path/to/output
+python scripts/process_GWTC_injs.py --in_path /path/to/lvk/injections --out_path /path/to/output
 ```
 
+`process_GWTC_PE.py` takes for `--in_paths` the directories to the parameter estimation data releases for each observing run. For an analysis on GWTC-4, one would input the directories downloaded from Zenodo records [8177023](https://zenodo.org/records/8177023) and [17602505](https://zenodo.org/records/17602505) for O1-3 and O4a, respectively. 
+
+`process_GWTC_injs.py` expects for `--in_path` the path to the injections of the cumulative search sensitivity estimates, with polar spins. For GWTC-4, this is `mixture-semi_o1_o2-real_o3_o4a-polar_spins_20250503134659UTC.hdf` of [16740128](https://zenodo.org/records/16740128).
+
 The PE samples NPZ should contain arrays keyed by parameter name (`mass_1_source`, `mass_2_source`, `mass_ratio`, `chi_eff`, `redshift`) plus `prior` (the PE sampling prior evaluated at each sample). The injections NPZ additionally needs `w` (mixture weights), `total_generated`, and `Tobs_yr`.
+
+#### the `config.json` file
+
+Alternatively, the paths to the data files can be specified in a `config.json` file in the root `RJpop` directory, which is used as the default if no arguments are provided. This is provided for the user's convenience to avoid having to specify data paths for each script. An example can be found in `examples/example_config.json`. 
+
+The allowed config settings are as follows:
+- `lvk_out_path`: The path to the output directory for the processed injection and PE `.npz` files. Used in `process_GWTC_PE.py` and `process_GWTC_injs.py` as the  output directory if `--out_path` is not specified. `rjpop/main.py` (the main MCMC script) will also load the PE and injection data from here if they are not supplied as arguments
+- `gwtc_injs_in_path`: The path to the mixture injections file, used in `process_GWTC_injs.py` if `--in_path` is not specified.
+- `gwtc_pe_in_paths`: A list of paths to the GWTC PE samples files. Used in `process_GWTC_PE.py` if `--in_paths` is not specified.
+
+A number of other settings can also be specified to be used in `main.py`:
+- `RJpop_out_path`: The directory for the output data products of the inference
+- `o4a-astro_path` and/or `o4b-astro_path`: Paths to the LVK population analysis results for [GWTC-4](https://zenodo.org/records/16911563) and/or [GWTC-5](https://zenodo.org/records/20292639), respectively. This is just used to automatically plot the inferered posterior distributions against the LVK analyses. If `o4b-astro_path` is given, then the `Default BBH` GWTC-5 analysis is plotted; otherwise if `o4a-astro_path` is given, then the `Default BBH` GWTC-4 analysis is plotted.
 
 ### 2. Write a prior configuration
 
 The prior is specified as a JSON file — a list of branch dictionaries. Each branch (except the last `"global"` branch) defines a set of RJ-enabled subpopulation components. The global branch holds parameters shared across all components (e.g., redshift evolution).
 
-See the [examples/](examples/) directory for complete prior files used in the paper. For instance, [examples/prior_skewt.json](examples/prior_skewt.json) defines a single branch of 1–4 components, each with a Jones-Faddy skew-t mass distribution and a shared power-law redshift evolution:
+See the [examples/](examples/) directory for complete prior files used in the paper. For instance, [examples/prior_skewt.json](examples/prior_skewt.json) defines a single branch of 1–4 components, each with a Jones-Faddy skew-t primary mass distribution, Gaussian conditional mass ratio distribution, Gaussian effective spin distribution, and a shared global power-law redshift evolution. Note the hierarchical specification of `"mass"` because $m_1, q$ is a joint distribution.
 
 ```json
 [
@@ -123,21 +147,14 @@ See the [examples/](examples/) directory for complete prior files used in the pa
 ```
 
 **Key conventions:**
-- `"__ncomp__": [min, max]` — range of allowed component counts for this branch
-- Parameter ranges `[min, max]` are sampled uniformly; a scalar fixes the parameter
-- `"__factor__"` sets the Gaussian proposal scale for each hyperparameter (in the same order they appear in the prior)
-- Available models are defined in `pdfs.py` and listed in `pdfs.MODELS`
+- `"__ncomp__": [nmin, nmax]` — range of allowed component counts for this branch
+- Parameter ranges `[min, max]` indicate a uniform prior, whereas specifying a scalar `x` fixes it at that value. 
+- `"__factor__"` sets the Gaussian proposal scale for each hyperparameter (in the same order they appear in the prior), necessary for reversible-jump branches (i.e. when $n_{\min} < n_{\max}$) where the Gibbs sampling move is Gaussian. For non-reversible-jump branches, the affine-invariant "stretch-move" is used and no specification of `"__factor__"` is needed.
+- Available models for `"__model__"` are defined in `rjpop/pdfs.py` and listed in the `pdfs.MODELS` dictionary
 
 ### 3. Run the sampler
 
-The args files in [examples/](examples/) can be passed directly to the submission script:
-
-```bash
-python rjpop/main.py $(cat examples/args_skewt.txt)
-```
-
-Or equivalently:
-
+Run the main script `rjpop/main.py`:
 ```bash
 python rjpop/main.py \
     --prior examples/prior_skewt.json \
@@ -154,6 +171,8 @@ python rjpop/main.py \
     --rj_num_try 2
 ```
 
+See the argument files in [examples/](examples/) for examples.
+
 Key arguments:
 
 | Argument | Description |
@@ -161,15 +180,19 @@ Key arguments:
 | `--prior` | Path to prior JSON file |
 | `--PE_samples` | Path to PE samples NPZ |
 | `--injs` | Path to injections NPZ |
+| `--seed` | Random seed for reproducibility (default: 1) |
+| `--label` | Label for output subdirectory (default: `out`) |
+| `--outdir` | Output directory. Defaults to `RJpop_out_path` from `config.json` |
 | `--nwalkers` | Walkers per temperature (default: 50) |
 | `--ntemps` | Number of temperatures for parallel tempering (default: 5) |
-| `--nsteps` | Number of MCMC steps (default: 2000) |
-| `--burn` | Burn-in steps with KDE updates (default: 0) |
-| `--kde_update` | Update RJ KDE proposals every N steps; 0 = use prior (default: 0) |
-| `--min_sep` | Minimum separation between components in whitened feature space (default: 3.0) |
-| `--rate_prior` | `[min max]` uniform rate prior per component in Gpc⁻³ yr⁻¹ (default: 0.05 100) |
-| `--LVK_plot` | Overlay LVK reference results: `default`, `spline`, or `none` (default: `default`) |
-| `--lvk_res_path` | Path to LVK population data release directory (required if `--LVK_plot != none`) |
+| `--Tmax` | Maximum temperature for parallel tempering (default: None) |
+| `--min_sep` | Minimum separation in feature space between components along any dimension (default: 1) |
+| `--nsteps` | Number of MCMC steps (default: 20000) |
+| `--burn` | Burn-in steps (default: 20000) |
+| `--rj_num_try` | Number of tries for MT reversible-jump MCMC (default: 1) |
+| `--group_chunk_size` | Evaluate the likelihood in batches of at most this many groups to cap peak GPU memory. Default: None (all groups in one pass) |
+
+A `--test` mode is also available, which is a helpful mode for debugging and verifying the installation with verbose outputs. It downsamples inputs to 500 samples, runs 10 likelihood tests, 5 burn steps and 50 short MCMC steps. To run it, add the `--test` flag to the run that you would like to test.
 
 ### 4. Outputs
 
@@ -187,11 +210,11 @@ settings.json                           # Run settings
 
 ## Population models
 
-The following models are available (see `pdfs.py` for details):
+The following models are available (see `pdfs.py` for details, as well as Section 6.2 of the [paper](https://arxiv.org/pdf/2605.25980)):
 
-**Mass models** (`mass_1_source`, `mass_2_source`): `skew_t`, `gaussian`, `gen_gaussian`, `SGED`, `smoothed_powerlaw`, `LVK_Plancktaper_powerlaw`
+**(Primary) mass models** (can be used for $p(m_1)$ or $p(m_2)$): `skew_t`, `gaussian`, `gen_gaussian`, `SGED`, `smoothed_powerlaw`, `LVK_Plancktaper_powerlaw`
 
-**Joint mass models** (`mass`): `m1_q` (independent $m_1$ and $q|m_1$), `m1_q_m2max` (with $m_2 \leq m_\mathrm{max}$ cutoff), `gaussian_copula`, `sym_gaussian_copula`
+**Joint mass models** (`mass`): `m1_q` ($p(m_1, q) = p(m_1) p(q | m_1)$), `m1_q_m2max` (with $m_2 \leq m_\mathrm{max}$ cutoff), `gaussian_copula`, `sym_gaussian_copula`
 
 **Spin models** (`chi_eff`): `gaussian`, `SGED`, `gen_gaussian`
 
@@ -199,9 +222,8 @@ The following models are available (see `pdfs.py` for details):
 
 ## GPU acceleration
 
-If [CuPy](https://cupy.dev/) is installed, the likelihood and model evaluations automatically run on GPU. No code changes are needed — the `xp.py` module handles the NumPy/CuPy dispatch transparently. Note that this
-code has not been tested on CPUs.
+If [CuPy](https://cupy.dev/) is installed, the likelihood and model evaluations automatically run on GPU; otherwise they run on CPU with `numpy`. CPU can also be forced with the `--cpu` flag.
 
 ## Citation
 
-If you use this code, please cite the associated paper (in prep.) and [Eryn](https://github.com/mikekatz04/Eryn).
+If you use this code, please cite [our paper](https://arxiv.org/abs/2605.25980) and [Eryn](https://github.com/mikekatz04/Eryn).

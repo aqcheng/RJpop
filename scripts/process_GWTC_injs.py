@@ -16,7 +16,7 @@ if __name__ == '__main__':
     cfg = load_config()
 
     parser = argparse.ArgumentParser(
-        description='Pre-process combined injection campaign, assuming polar spins.'
+        description='Pre-process cumulative sensitivity injection campaign, assuming polar spins.'
     )
     parser.add_argument(
         '--in_path', '-in_path', type=str,
