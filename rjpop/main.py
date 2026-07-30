@@ -77,6 +77,7 @@ parser.add_argument('--nsteps', '-nsteps', type=int, default=20000, help='Number
 parser.add_argument('--burn', '-burn', type=int, default=20000, help='Number of burn-in steps.')
 parser.add_argument('--kde_update', type=int, default=0, help='Every kde_update steps, update the KDE from which the reversible jump moves are proposed. Default: 0 (never update, use prior for rj proposals)')
 parser.add_argument('--discard', '-discard', type=int, default=None, help='Number of steps to discard in post. Default: None (determine automatically)')
+parser.add_argument('--thin', '-thin', type=int, default=1, help='Thinning factor')
 parser.add_argument('--outdir', '-outdir', type=str, default=cfg.get("RJpop_out_path"), help='Output directory. Uses RJpop_out_path from config.json if not specified.')
 parser.add_argument('--cpu', action='store_true', help='Force CPU instead of GPU')
 
@@ -87,7 +88,7 @@ parser.add_argument('--rate_prior', type=float, nargs=2, default=(0.05, 100), he
 # plotting options
 # parser.add_argument('--LVK_plot', type=str, choices=['default', 'spline', 'none'], default='default', help='Which LVK results to plot as reference, if any')
 # parser.add_argument('--lvk_res_path', type=str, default=lvk_res_path_default, help='Path to the LVK population data release directory (required when --LVK_plot != none)')
-parser.add_argument('--popsummary_path', type=str, default=None, help='Path to the popsummary directory for LVK results. Retrieves from config.json [o4b-astro_path]/popsummary_files, then falls back to [o4a-astro_path]/data_release by default')
+parser.add_argument('--popsummary_path', type=str, default=None, help='Path to the popsummary directory for LVK results. Retrieves from config.json [o4b-astro_path]/popsummary_files, then falls back to [o4a-astro_path]/data_release by default. Input `NULL` to skip LVK plotting.')
 parser.add_argument('--skip_corner', action='store_true', help='Skip the corner plots (speeds up post-processing for debugging or reruns)')
 parser.add_argument('--plot-only', action='store_true', help='Plot only, assuming there is already a results file; overrides args.nsteps and args.nburn')
 parser.add_argument('--ndraws', type=int, default=1000, help='Number of draws for creating posterior probability plots. Default: 1000')
@@ -300,7 +301,7 @@ if not os.path.exists(backend_path):
             if (
                 ncomps > 1 and args.min_sep > 0
             ):  # make sure leaves are initialized sufficiently far apart
-                feats, _ = data.compute_branch_moment_features(b_idx, input_hps)
+                feats, _ = data.compute_branch_moment_features(b_idx, input_hps, autoscale=False)
                 minsep_bad_groups_mask = ~utils.check_min_separation(
                     feats, min_sep=args.min_sep, xp=xp
                 )
@@ -520,25 +521,11 @@ if not PLOT_ONLY:
     )
     nsamps, nwalker = logP.shape
 
-    converged = False
-    while not converged:
-        # compute discard automatically -  fit linear + flat
-        discard = utils.get_discard_from_chain(logP) if args.discard is None else args.discard
-
-        if discard > nsamps - 500:
-            print("Sampler has not converged - running for another 1000 steps")
-            last_state = ensemble.run_mcmc(last_state, 1000, burn=burn, progress=True)
-            print(f"Saved backend to {backend}")
-            print("Maximum log posterior:", np.amax(logP))
-            logP = ensemble.get_log_posterior()[:, 0]
-        else:
-            converged = True
-            del ensemble
-
 else:
     logP = backend.get_log_posterior()[:, 0]
-    discard = utils.get_discard_from_chain(logP) if args.discard is None else args.discard
     last_state = state
+
+discard = utils.get_discard_from_chain(logP) if args.discard is None else args.discard
 
 # print diagnostics
 utils.print_to(
@@ -605,6 +592,7 @@ plt.close()
 # compute thin
 thin, tau = utils.get_thin_from_chain(backend.get_chain(discard=discard), return_tau=True)
 utils.print_to(logpath, f"\nIntegrated autocorrelation times: {tau}")
+thin = max(thin, args.thin)
 
 chain = backend.get_chain(discard=discard, thin=thin, temp_index=0)
 logP = backend.get_log_posterior(discard=discard, thin=thin)
@@ -1341,7 +1329,9 @@ def _branch_label_ppd(x, param_name, branch_idx, draw_ctx, use_labels=True):
 
 popsummary_path = args.popsummary_path 
 if popsummary_path is None:
-    if cfg.get("o4b-astro_path", None) is not None:
+    if args.popsummary_path == "NULL":
+        plot_cat = None
+    elif cfg.get("o4b-astro_path", None) is not None:
         popsummary_path = os.path.join(cfg.get("o4b-astro_path"), "popsummary_files")
         plot_cat = "GWTC5"
     elif cfg.get("o4a-astro_path", None) is not None:

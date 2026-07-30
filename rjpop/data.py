@@ -10,10 +10,10 @@ from astropy.cosmology import Planck15
 from eryn.prior import ProbDistContainer, log_uniform, uniform_dist
 from matplotlib.colors import to_rgba
 from matplotlib.patches import Patch
+from popsummary.popresult import PopulationResult
 from scipy.stats import gaussian_kde
 from sklearn.cluster import KMeans
 from xp import INF, scatter_add, xp
-from popsummary.popresult import PopulationResult
 
 # ---------------------------
 # --------- GLOBALS ---------

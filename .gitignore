@@ -1,7 +1,7 @@
 scratch/*
 .ipynb_checkpoints
 .vscode
-# scripts/test*
+scripts/test*
 scripts/ref*
 submit/
 __pycache__/

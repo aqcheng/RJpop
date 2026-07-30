@@ -136,9 +136,9 @@ class dist(ABC):
     def ppf(cls, q, *args, loc=0, scale=1, **kwargs):
         return cls._ppf(q, *args, **kwargs) * scale + loc
 
-    @staticmethod
+    @abstractmethod
     def _moments(*args, **kwargs):
-        return 0.0, 0.0
+        raise NotImplementedError
 
     @classmethod
     def moments(cls, *args, loc=0, scale=1, **kwargs):
@@ -598,18 +598,20 @@ class skew_gaussian(trunc_dist):
     :math:`\epsilon < 0` gives more support at :math:`x > \mu`. The distribution
     reduces to a standard, symmetric Gaussian when :math:`\epsilon = 0`.
 
-    Because the piecewise split is at :math:`x = 0` (not at :math:`\mu`), this is
-    not a location-scale family, so the ``loc`` / ``scale`` / truncation handling
-    of ``trunc_dist`` is reimplemented here directly. Note that the :math:`1 \pm
-    \epsilon` prefactor cancels the :math:`1 / (1 \pm \epsilon)` from the per-side
-    scale, leaving an overall :math:`1 / \sigma`.
+    The piecewise split is at :math:`x = \mu`, so shifting/rescaling by
+    ``loc``/``scale`` is a genuine location-scale transform of the standard
+    (``loc=0``, ``scale=1``) form; the ``loc``/``scale``/truncation handling of
+    ``trunc_dist`` is nonetheless reimplemented here directly since the split
+    point itself depends on ``loc``. Note that the :math:`1 \pm \epsilon`
+    prefactor cancels the :math:`1 / (1 \pm \epsilon)` from the per-side scale,
+    leaving an overall :math:`1 / \sigma`.
 
     See Banagiri et al. 2025 (Eq. B37).
     """
 
     @staticmethod
     def _side_scales(scale, epsilon):
-        # left scale (x <= 0) and right scale (x >= 0)
+        # left scale (x <= loc) and right scale (x >= loc)
         return scale * (1 + epsilon), scale * (1 - epsilon)
 
     @staticmethod
@@ -617,7 +619,7 @@ class skew_gaussian(trunc_dist):
         # log of the un-truncated skew density g(x), with the (1 +/- eps)
         # prefactor folded in (it cancels the 1/(1 +/- eps) of the per-side scale).
         s_left, s_right = skew_gaussian._side_scales(scale, epsilon)
-        s = xp.where(x <= 0, s_left, s_right)
+        s = xp.where(x <= loc, s_left, s_right)
         z = (x - loc) / s
         return -0.5 * z**2 - 0.5 * xp.log(2 * xp.pi) - xp.log(scale)
 
@@ -626,12 +628,10 @@ class skew_gaussian(trunc_dist):
         # G(x) = integral_{-inf}^{x} g(x') dx', the un-normalized base CDF.
         x = xp.asarray(x)
         s_left, s_right = skew_gaussian._side_scales(scale, epsilon)
-        g0 = (1 + epsilon) * special.ndtr(-loc / s_left)  # base mass below x = 0
+        g0 = 0.5 * (1 + epsilon)  # base mass at the split point x = loc
         left = (1 + epsilon) * special.ndtr((x - loc) / s_left)
-        right = g0 + (1 - epsilon) * (
-            special.ndtr((x - loc) / s_right) - special.ndtr(-loc / s_right)
-        )
-        return xp.where(x <= 0, left, right)
+        right = epsilon + (1 - epsilon) * special.ndtr((x - loc) / s_right)
+        return xp.where(x <= loc, left, right)
 
     # standard (loc=0, scale=1) form, kept to satisfy the dist/trunc_dist interface
     @staticmethod
@@ -680,9 +680,9 @@ class skew_gaussian(trunc_dist):
         # invert the un-normalized base CDF at the rescaled quantile target
         t = G_lo + xp.clip(xp.asarray(q), EPS, 1 - EPS) * (G_hi - G_lo)
         t = xp.asarray(t)
-        g0 = (1 + epsilon) * special.ndtr(-loc / s_left)
+        g0 = 0.5 * (1 + epsilon)  # base mass at the split point x = loc
         left = loc + s_left * special.ndtri(xp.clip(t / (1 + epsilon), EPS, 1 - EPS))
-        right_q = special.ndtr(-loc / s_right) + (t - g0) / (1 - epsilon)
+        right_q = (t - epsilon) / (1 - epsilon)
         right = loc + s_right * special.ndtri(xp.clip(right_q, EPS, 1 - EPS))
         return xp.where(t <= g0, left, right)
 
@@ -750,12 +750,28 @@ class powerlaw:
 
     @staticmethod
     def ppf(q, beta, xmin, xmax):
-        a = 1.0 + beta
-        return xp.where(
-            beta == -1.0,
-            xmin * (xmax / xmin) ** q,
-            xp.power((xmax**a - xmin**a) * q + xmin**a, 1 / a),
+        q = xp.asarray(q)
+        beta = xp.asarray(beta)
+        xmin = xp.maximum(xmin, 0.01) # or else undefined for negative PL index
+
+        a = beta + 1.0
+        beta_m1 = xp.isclose(beta, -1.0)
+
+        # General case
+        x = xp.power(
+            xmin**a + q * (xmax**a - xmin**a),
+            1.0 / a,
         )
+
+        # Logarithmic case (beta = -1)
+        if xp.any(beta_m1):
+            x = xp.where(
+                beta_m1,
+                xmin * xp.power(xmax / xmin, q),
+                x,
+            )
+
+        return x
 
     @classmethod
     def moments(cls, beta, xmin, xmax):
@@ -916,7 +932,7 @@ class LVK_Plancktaper_powerlaw(dist):
         norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
 
         if xp.asarray(norm).ndim > 0:
-            norm = norm[:, None]
+            norm = norm[..., None]
 
         return pdf_unnorm / norm
 
@@ -928,10 +944,17 @@ class LVK_Plancktaper_powerlaw(dist):
         if xx_int is None:
             xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
 
-        norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)[
-            :, None
-        ]
+        norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
+        if xp.asarray(norm).ndim > 0:
+            norm = norm[..., None]
         return logpdf_unnorm - xp.log(norm)
+    
+    @staticmethod
+    def _moments(alpha, xmin, xmax, delta):
+        # use mode for first moment, quantiles for width (approximated w/o low end smoothing)
+        mode = xmin + delta
+        width = (powerlaw.ppf(0.5, -alpha, xmin, xmax) - mode) / 2
+        return mode, width
 
 
 _mm = xp.linspace(2, 300, 1024)
