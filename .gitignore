@@ -9,4 +9,4 @@ submit.sh
 data_release
 config.json
 profiling/
-paper_plots/
+plots_not_public/
