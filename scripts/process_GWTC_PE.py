@@ -184,7 +184,7 @@ if __name__ == "__main__":
 
     from astropy.cosmology import Planck15
     from rjpop.effective_spin_priors import chi_effective_prior_from_isotropic_spins
-    from rjpop.load_config import load_config
+    from rjpop.load_config import load_config, update_config
 
     cfg = load_config()
 
@@ -202,34 +202,37 @@ if __name__ == "__main__":
         "--in_paths",
         type=str,
         nargs="+",
-        default=cfg.get('lvk_pe_in_paths'),
+        default=cfg.get("lvk_pe_in_paths"),
         help="Path(s) to directories with LVK PE samples. "
-             "Default: lvk_pe_in_paths in ~/.rjpop_config.json",
+        "Default: lvk_pe_in_paths in ~/.rjpop_config.json",
     )
     parser.add_argument(
         "--GWTC3_BBHs_path",
         type=str,
         default=None,
-        help="Path to GWTC3 BBHs file. "
-             "Default: None",
+        help="Path to GWTC3 BBHs file. Default: None",
     )
     parser.add_argument(
         "--GWTC4_BBHs_path",
         type=str,
-        default=os.path.join(cfg.get('o4b-astro_path'), 'Event_list', 'GWTC4.1_BBH.txt'),
+        default=os.path.join(
+            cfg.get("o4b-astro_path"), "Event_list", "GWTC4.1_BBH.txt"
+        ),
         help="Path to GWTC4 BBHs file. "
-             "Default: [o4b-astro_path]/Event_list/GWTC4.1_BBH.txt",
+        "Default: [o4b-astro_path]/Event_list/GWTC4.1_BBH.txt",
     )
     parser.add_argument(
         "--GWTC5_BBHs_path",
         type=str,
-        default=os.path.join(cfg.get('o4b-astro_path'), 'Event_list', 'GWTC5_BBH.txt'),
+        default=os.path.join(cfg.get("o4b-astro_path"), "Event_list", "GWTC5_BBH.txt"),
         help="Path to GWTC5 BBHs file. "
-             "Default: [o4b-astro_path]/Event_list/GWTC5_BBH.txt",
+        "Default: [o4b-astro_path]/Event_list/GWTC5_BBH.txt",
     )
     parser.add_argument(
-        "-out_path", "--out_path", type=str,
-        default=cfg.get('lvk_out_path'),
+        "-out_path",
+        "--out_path",
+        type=str,
+        default=cfg.get("lvk_out_path"),
         help="Output directory. Default: out_path in ~/.rjpop_config.json",
     )
     # parser.add_argument(
@@ -249,27 +252,33 @@ if __name__ == "__main__":
         help="Target number of PE samples to save",
     )
     parser.add_argument(
-        "--save_prior", action="store_true", default=False, help="Save the prior dictionary"
+        "--save_prior",
+        action="store_true",
+        default=False,
+        help="Save the prior dictionary",
     )
     args = parser.parse_args()
 
-    priors, PE_samples = {param: [] for param in args.params}, {param: [] for param in args.params}
+    priors, PE_samples = (
+        {param: [] for param in args.params},
+        {param: [] for param in args.params},
+    )
     PE_samples["event_names"] = []
 
     BBHs_dict = {"GWTC3": GWTC3_BBHs, "GWTC4": GWTC4_BBHs}
     if args.GWTC3_BBHs_path is not None:
         if os.path.exists(args.GWTC3_BBHs_path):
-            with open(args.GWTC3_BBHs_path, 'r') as f:
+            with open(args.GWTC3_BBHs_path, "r") as f:
                 print(f"Fetching GWTC3 BBHs list from {args.GWTC3_BBHs_path}")
                 BBHs_dict["GWTC3"] = f.read().splitlines()
     if args.GWTC4_BBHs_path is not None:
         if os.path.exists(args.GWTC4_BBHs_path):
-            with open(args.GWTC4_BBHs_path, 'r') as f:
+            with open(args.GWTC4_BBHs_path, "r") as f:
                 print(f"Fetching GWTC4 BBHs list from {args.GWTC4_BBHs_path}")
                 BBHs_dict["GWTC4"] = f.read().splitlines()
     if args.GWTC5_BBHs_path is not None:
         if os.path.exists(args.GWTC5_BBHs_path):
-            with open(args.GWTC5_BBHs_path, 'r') as f:
+            with open(args.GWTC5_BBHs_path, "r") as f:
                 print(f"Fetching GWTC5 BBHs list from {args.GWTC5_BBHs_path}")
                 BBHs_dict["GWTC5"] = f.read().splitlines()
 
@@ -285,11 +294,14 @@ if __name__ == "__main__":
             prior_saved = True
 
         for fn in sorted(os.listdir(dirname)):
-            if not((fn.endswith("_cosmo.h5") or fn.endswith(".hdf5")) and "PEDataRelease" in fn):
+            if not (
+                (fn.endswith("_cosmo.h5") or fn.endswith(".hdf5"))
+                and "PEDataRelease" in fn
+            ):
                 continue
 
             print(f"   {fn}")
-            
+
             catname = fn.split("-")[1][:5]
             event_name = "GW" + "_".join(re.split("[_-]+", fn.split("-GW")[2])[:2])
 
@@ -299,16 +311,18 @@ if __name__ == "__main__":
                     continue
 
             with h5py.File(os.path.join(dirname, fn), "r") as f:
-                if any("NSBH" in k for k in f.keys()) or any("Tidal" in k for k in f.keys()):
+                if any("NSBH" in k for k in f.keys()) or any(
+                    "Tidal" in k for k in f.keys()
+                ):
                     print(f"   skipping {event_name}, not confidently a BBH")
                     continue
 
                 if catname == "GWTC3":
                     IMR_key = [k for k in f.keys() if "IMRPhenom" in k][0]
-                    if 'C01:Mixed' in f.keys():
-                        mixed_nsamps = f['C01:Mixed']['posterior_samples'].shape[0]
-                        IMR_nsamps = f[IMR_key]['posterior_samples'].shape[0]
-                        key = 'C01:Mixed' if mixed_nsamps > IMR_nsamps else IMR_key
+                    if "C01:Mixed" in f.keys():
+                        mixed_nsamps = f["C01:Mixed"]["posterior_samples"].shape[0]
+                        IMR_nsamps = f[IMR_key]["posterior_samples"].shape[0]
+                        key = "C01:Mixed" if mixed_nsamps > IMR_nsamps else IMR_key
                     else:
                         key = IMR_key
                 else:
@@ -317,22 +331,28 @@ if __name__ == "__main__":
                     elif any("Mixed" in k for k in f.keys()):
                         key = [k for k in f.keys() if "Mixed" in k][0]
                     elif any("IMRPhenomXPHM-SpinTaylor" in k for k in f.keys()):
-                        key = [k for k in f.keys() if "IMRPhenomXPHM-SpinTaylor" in k][0] # O4b events
+                        key = [k for k in f.keys() if "IMRPhenomXPHM-SpinTaylor" in k][
+                            0
+                        ]  # O4b events
                     else:
-                        raise ValueError(f"Could not find a waveform model in {fn}. Available waveforms: {list(f.keys())}")
-                
+                        raise ValueError(
+                            f"Could not find a waveform model in {fn}. Available waveforms: {list(f.keys())}"
+                        )
+
                 # check if it's a BBH
-                if_BBH_samples = (
-                    np.asarray(f[key]["posterior_samples"][:, "mass_1_source"] > 3)
-                    & np.asarray(f[key]["posterior_samples"][:, "mass_2_source"] > 3)
-                )
+                if_BBH_samples = np.asarray(
+                    f[key]["posterior_samples"][:, "mass_1_source"] > 3
+                ) & np.asarray(f[key]["posterior_samples"][:, "mass_2_source"] > 3)
                 if np.mean(if_BBH_samples) < 0.99:
                     print(f"   skipping {event_name}, not confidently a BBH")
                     continue
-                
+
                 nsamps_tot = f[key]["posterior_samples"].size
 
-                wf_per_event[event_name] = [key.split(":")[-1], nsamps_tot] # record waveform and number of samples
+                wf_per_event[event_name] = [
+                    key.split(":")[-1],
+                    nsamps_tot,
+                ]  # record waveform and number of samples
                 PE_samples["event_names"].append(event_name)
                 catnames.add(catname[-1])
 
@@ -382,7 +402,9 @@ if __name__ == "__main__":
     q = PE_samples["mass_ratio"]
     chi_eff = PE_samples["chi_eff"]
 
-    prior = (1 + z) ** 2 * Planck15.differential_comoving_volume(z).value / 1e9  # p(m1,m2,z)
+    prior = (
+        (1 + z) ** 2 * Planck15.differential_comoving_volume(z).value / 1e9
+    )  # p(m1,m2,z)
     prior *= m1  # p(m1,m2) -> p(m1, q)
 
     prior *= chi_effective_prior_from_isotropic_spins(chi_eff=chi_eff, q=q, aMax=0.99)
@@ -392,7 +414,17 @@ if __name__ == "__main__":
     # save
     prefix = "GWTC" + "".join(sorted(catnames))
     np.savez(os.path.join(args.out_path, f"{prefix}_PE_samples.npz"), **PE_samples)
+    update_config(
+        "pe_samples_path", os.path.join(args.out_path, f"{prefix}_PE_samples.npz")
+    )
 
     # save table of event names, keys
-    wf_per_event_list = [(event, wf_per_event[event][0], wf_per_event[event][1]) for event in sorted(PE_samples["event_names"])]
-    np.savetxt(os.path.join(args.out_path, f"{prefix}_event_waveforms.txt"), wf_per_event_list, fmt="%s")
+    wf_per_event_list = [
+        (event, wf_per_event[event][0], wf_per_event[event][1])
+        for event in sorted(PE_samples["event_names"])
+    ]
+    np.savetxt(
+        os.path.join(args.out_path, f"{prefix}_event_waveforms.txt"),
+        wf_per_event_list,
+        fmt="%s",
+    )
