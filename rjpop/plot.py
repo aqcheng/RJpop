@@ -70,6 +70,7 @@ def plot_ppds(
     secondary_lw=0,
     lws=0.3,
     ls="-",
+    secondary_ls="--",
     swap_xy=False,
     rasterize=False,
 ):
@@ -113,8 +114,8 @@ def plot_ppds(
                 ax.plot(low, x, color=color, lw=secondary_lw, ls="--", label=label)
                 ax.plot(high, x, color=color, lw=secondary_lw, ls="--")
             else:
-                ax.plot(x, low, color=color, lw=secondary_lw, ls="--", label=label)
-                ax.plot(x, high, color=color, lw=secondary_lw, ls="--")
+                ax.plot(x, low, color=color, lw=secondary_lw, ls=secondary_ls, label=label)
+                ax.plot(x, high, color=color, lw=secondary_lw, ls=secondary_ls)
 
 
 def plot_chains(

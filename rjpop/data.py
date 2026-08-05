@@ -352,7 +352,7 @@ def unpack_hp_vals(branch_idx, param, hyperparams, branch_groups=None, param_dic
                 hp_vals,
                 model_hp_vals_dict[hp],
             )
-        if hp == "xmax" and "xmax" in model_hp_vals_dict:
+        elif hp == "xmax" and "xmax" in model_hp_vals_dict:
             # take the most stringent maximum
             # hp might have nans in it, so we need to handle that
             model_hp_vals_dict[hp] = xp.where(
