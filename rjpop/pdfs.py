@@ -582,14 +582,15 @@ class SGED(trunc_dist):
 class skew_gaussian(trunc_dist):
     r"""
     Skew-normal effective spin distribution: a skewed, ``[xmin, xmax]``-truncated
-    Gaussian. The (un-truncated) density is
+    Gaussian. The density is
 
     .. math::
 
-        \pi(x \mid \mu, \sigma, \epsilon) \propto
+        p(\chieff |  \mu_\chi, \sigma_\chi, \epsilon_\chi) \propto
         \begin{cases}
-        (1 + \epsilon)\, \mathcal{N}(x \mid \mu, \sigma(1 + \epsilon)) & x \le 0, \\
-        (1 - \epsilon)\, \mathcal{N}(x \mid \mu, \sigma(1 - \epsilon)) & x \ge 0,
+        (1 + \epsilon_\chi)\, \mathcal{G}(x | \mu_\chi, \sigma_\chi(1 + \epsilon_\chi)) & -1 \le \chieff \le \mu_\chi, \\
+        (1 - \epsilon_\chi)\, \mathcal{G}(x | \mu_\chi, \sigma_\chi(1 - \epsilon_\chi)) & \mu_\chi \leq \chieff \leq 1, \\
+        0 & \text{otherwise}
         \end{cases}
 
     where :math:`\mu` (``loc``) and :math:`\sigma` (``scale``) set the location
@@ -598,8 +599,9 @@ class skew_gaussian(trunc_dist):
     :math:`\epsilon < 0` gives more support at :math:`x > \mu`. The distribution
     reduces to a standard, symmetric Gaussian when :math:`\epsilon = 0`.
 
+    This function is compatible with the `trunc_dist` base class.
     The piecewise split is at :math:`x = \mu`, so shifting/rescaling by
-    ``loc``/``scale`` is a genuine location-scale transform of the standard
+    ``loc``/``scale`` is a location-scale transform of the standard
     (``loc=0``, ``scale=1``) form; the ``loc``/``scale``/truncation handling of
     ``trunc_dist`` is nonetheless reimplemented here directly since the split
     point itself depends on ``loc``. Note that the :math:`1 \pm \epsilon`
@@ -926,8 +928,10 @@ class LVK_Plancktaper_powerlaw(dist):
         pdf_unnorm = cls._unnorm_pdf(x, alpha, xmin, xmax, delta)
 
         # compute normalization - assumes x is the last dimension
+        # nanmin/nanmax since inactive RJ leaves are nan-padded: a single nan would
+        # otherwise make the shared integration grid (and hence every leaf's norm) nan
         if xx_int is None:
-            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
+            xx_int = xp.linspace(xp.nanmin(xp.asarray(xmin)), xp.nanmax(xp.asarray(xmax)), 256)
 
         norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
 
@@ -942,7 +946,7 @@ class LVK_Plancktaper_powerlaw(dist):
 
         # compute normalization - assumes x is the last dimension
         if xx_int is None:
-            xx_int = xp.linspace(xp.amin(xp.asarray(xmin)), xp.amax(xp.asarray(xmax)), 256)
+            xx_int = xp.linspace(xp.nanmin(xp.asarray(xmin)), xp.nanmax(xp.asarray(xmax)), 256)
 
         norm = xp.trapezoid(cls._unnorm_pdf(xx_int, alpha, xmin, xmax, delta), xx_int, axis=-1)
         if xp.asarray(norm).ndim > 0:
